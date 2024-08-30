@@ -11,8 +11,8 @@ on:
     branches:
       - main
   # Schedule to run on every day at 21:00 UTC (05:00 Beijing Time)
-  schedule:
-    - cron: '0 21 * * *'
+  #schedule:
+    #- cron: '0 21 * * *'
 
 jobs:
   osdk-test:

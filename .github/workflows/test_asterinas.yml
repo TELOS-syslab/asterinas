@@ -6,8 +6,8 @@ on:
     branches:
       - main
   # Schedule to run on every day at 22:00 UTC (06:00 Beijing Time)
-  schedule:
-    - cron: '0 22 * * *'
+  #schedule:
+    #- cron: '0 22 * * *'
 
 jobs:
   lint:
