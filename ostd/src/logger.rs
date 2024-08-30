@@ -13,8 +13,7 @@
 use log::{LevelFilter, Metadata, Record};
 
 use crate::{
-    boot::{kcmdline::ModuleArg, kernel_cmdline},
-    timer::Jiffies,
+    boot::{kcmdline::ModuleArg, kernel_cmdline}, early_println, timer::Jiffies
 };
 
 const LOGGER: Logger = Logger {};
@@ -83,7 +82,7 @@ pub(crate) fn init() {
 
 fn get_log_level() -> Option<LevelFilter> {
     let module_args = kernel_cmdline().get_module_args("ostd")?;
-
+    early_println!("[tcmalloc] get_log_level module_args {:#?}", module_args);
     let arg = module_args.iter().find(|arg| match arg {
         ModuleArg::Arg(_) => false,
         ModuleArg::KeyVal(name, _) => name.as_bytes() == "log_level".as_bytes(),

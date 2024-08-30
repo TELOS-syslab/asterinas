@@ -1,162 +1,104 @@
 // SPDX-License-Identifier: MPL-2.0
 
-mod slab_allocator;
-
 use core::alloc::{GlobalAlloc, Layout};
+use core::panic;
 
-use align_ext::AlignExt;
-use log::debug;
-use slab_allocator::Heap;
-use spin::Once;
-
-use super::paddr_to_vaddr;
-use crate::{
-    mm::{page::allocator::PAGE_ALLOCATOR, PAGE_SIZE},
-    prelude::*,
-    sync::SpinLock,
-    trap::disable_local,
-    Error,
+use tcmalloc::common::K_PAGE_SHIFT;
+use tcmalloc::{
+    common::{K_BASE_NUMBER_SPAN, K_PAGE_SIZE, K_PRIMARY_HEAP_LEN},
+    error_handler::TcmallocErr,
+    Tcmalloc,
 };
 
+use crate::early_println;
+
+mod tcmalloc;
+
+// FIXME: The number of cpu should be introduced at runtime.
+const K_MAX_PAGE_NUMBER: usize = 1024;
+const CPU_NUMBER: usize = 16;
+const INIT_KERNEL_HEAP_SIZE: usize = K_PAGE_SIZE * K_PRIMARY_HEAP_LEN;
+
 #[global_allocator]
-static HEAP_ALLOCATOR: LockedHeapWithRescue = LockedHeapWithRescue::new();
+static mut HEAP_ALLOCATOR: Tcmalloc<CPU_NUMBER> = Tcmalloc::new();
 
 #[alloc_error_handler]
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     panic!("Heap allocation error, layout = {:?}", layout);
 }
 
-const INIT_KERNEL_HEAP_SIZE: usize = PAGE_SIZE * 256;
-
 #[repr(align(4096))]
 struct InitHeapSpace([u8; INIT_KERNEL_HEAP_SIZE]);
 
-static mut HEAP_SPACE: InitHeapSpace = InitHeapSpace([0; INIT_KERNEL_HEAP_SIZE]);
+static PRIMARY_HEAP: InitHeapSpace = InitHeapSpace([0; INIT_KERNEL_HEAP_SIZE]);
 
 pub fn init() {
-    // SAFETY: The HEAP_SPACE is a static memory range, so it's always valid.
-    unsafe {
-        HEAP_ALLOCATOR.init(HEAP_SPACE.0.as_ptr(), INIT_KERNEL_HEAP_SIZE);
-    }
+    // TODO: SAFETY
+    early_println!("[tcmalloc] init.");
+    unsafe { HEAP_ALLOCATOR.init(K_MAX_PAGE_NUMBER, PRIMARY_HEAP.0.as_ptr() as usize) };
 }
 
-struct LockedHeapWithRescue {
-    heap: Once<SpinLock<Heap>>,
+// FIXME: Implement this function by APIs provided by 
+fn get_current_cpu() -> usize {
+    0
 }
 
-impl LockedHeapWithRescue {
-    /// Creates an new heap
-    pub const fn new() -> Self {
-        Self { heap: Once::new() }
-    }
+unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let cpu = get_current_cpu();
 
-    /// SAFETY: The range [start, start + size) must be a valid memory region.
-    pub unsafe fn init(&self, start: *const u8, size: usize) {
-        self.heap
-            .call_once(|| SpinLock::new(Heap::new(start as usize, size)));
-    }
-
-    /// SAFETY: The range [start, start + size) must be a valid memory region.
-    unsafe fn add_to_heap(&self, start: usize, size: usize) {
-        self.heap
-            .get()
-            .unwrap()
-            .disable_irq()
-            .lock()
-            .add_memory(start, size);
-    }
-
-    fn rescue_if_low_memory(&self, remain_bytes: usize, layout: Layout) {
-        if remain_bytes <= PAGE_SIZE * 4 {
-            debug!(
-                "Low memory in heap allocator, try to call rescue. Remaining bytes: {:x?}",
-                remain_bytes
-            );
-            // We don't care if the rescue returns ok or not since we can still do heap allocation.
-            let _ = self.rescue(&layout);
-        }
-    }
-
-    fn rescue(&self, layout: &Layout) -> Result<()> {
-        const MIN_NUM_FRAMES: usize = 0x4000000 / PAGE_SIZE; // 64MB
-
-        debug!("enlarge heap, layout = {:?}", layout);
-        let mut num_frames = {
-            let align = PAGE_SIZE.max(layout.align());
-            debug_assert!(align % PAGE_SIZE == 0);
-            let size = layout.size().align_up(align);
-            size / PAGE_SIZE
-        };
-
-    let allocation_start_paddr = {
-        let mut page_allocator = PAGE_ALLOCATOR.get().unwrap().lock();
-        if num_frames >= MIN_NUM_FRAMES {
-            page_allocator
-                .alloc(Layout::from_size_align(num_frames * PAGE_SIZE, PAGE_SIZE).unwrap())
-                .ok_or(Error::NoMemory)?
-        } else {
-            match page_allocator
-                .alloc(Layout::from_size_align(MIN_NUM_FRAMES * PAGE_SIZE, PAGE_SIZE).unwrap())
-            {
-                None => page_allocator
-                    .alloc(Layout::from_size_align(num_frames * PAGE_SIZE, PAGE_SIZE).unwrap())
-                    .ok_or(Error::NoMemory)?,
-                Some(start) => {
-                    num_frames = MIN_NUM_FRAMES;
-                    start
+        match HEAP_ALLOCATOR.allocate(cpu, layout) {
+            Ok(ptr) => {
+                // early_println!("[tcmalloc] alloc ptr = {:x}, size = {}", ptr as usize, layout.size());
+                ptr
+            },
+            Err(err) => {
+                match err {
+                    TcmallocErr::Redo => self.alloc(layout),
+                    TcmallocErr::PageAlloc(pages) => {
+                        match pages > K_BASE_NUMBER_SPAN {
+                            false => {
+                                todo!("[tcmalloc] allocate a span from PageAllocator.");
+                                // TODO: `ptr` points to the new span.
+                                let ptr = core::ptr::null_mut();
+                                let new_layout = core::alloc::Layout::from_size_align_unchecked(pages << K_PAGE_SHIFT, K_PAGE_SIZE);
+                                self.dealloc(ptr, new_layout);
+                                self.alloc(layout)
+                            },
+                            true => todo!("[tcmalloc] allocate an object from PageAllocator. layout = {:#?}", layout),
+                        }
+                    },
+                    TcmallocErr::PageDealloc(addr, pages) => todo!("[tcmalloc] deallocate a span by PageAllocator. layout = {:#?}", layout),
                 }
             }
-        }
-    };
-    // FIXME: the alloc function internally allocates heap memory(inside FrameAllocator).
-    // So if the heap is nearly run out, allocating frame will fail too.
-    let vaddr = paddr_to_vaddr(allocation_start_paddr);
-
-        // SAFETY: the frame is allocated from FrameAllocator and never be deallocated,
-        // so the addr is always valid.
-        unsafe {
-            debug!(
-                "add frames to heap: addr = 0x{:x}, size = 0x{:x}",
-                vaddr,
-                PAGE_SIZE * num_frames
-            );
-            self.add_to_heap(vaddr, PAGE_SIZE * num_frames);
-        }
-
-        Ok(())
-    }
-}
-
-unsafe impl GlobalAlloc for LockedHeapWithRescue {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _guard = disable_local();
-
-        let res = self.heap.get().unwrap().lock().allocate(layout);
-        if let Ok((allocation, remain_bytes)) = res {
-            self.rescue_if_low_memory(remain_bytes, layout);
-            return allocation;
-        }
-
-        if self.rescue(&layout).is_err() {
-            return core::ptr::null_mut::<u8>();
-        }
-
-        let res = self.heap.get().unwrap().lock().allocate(layout);
-        if let Ok((allocation, remain_bytes)) = res {
-            self.rescue_if_low_memory(remain_bytes, layout);
-            allocation
-        } else {
-            core::ptr::null_mut::<u8>()
         }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        debug_assert!(ptr as usize != 0);
-        self.heap
-            .get()
-            .unwrap()
-            .disable_irq()
-            .lock()
-            .deallocate(ptr, layout)
+        let cpu = get_current_cpu();
+
+        match HEAP_ALLOCATOR.deallocate(cpu, ptr, layout) {
+            Ok(()) => {
+                // early_println!("[tcmalloc] dealloc ptr = {:x}, size = {}", ptr as usize, layout.size());
+            },
+            Err(err) => {
+                match err {
+                    TcmallocErr::Redo => self.dealloc(ptr, layout),
+                    TcmallocErr::PageAlloc(pages) => {
+                        match pages > K_BASE_NUMBER_SPAN {
+                            false => {
+                                todo!("[tcmalloc] allocate a span from PageAllocator.");
+                                // TODO: `ptr` points to the new span.
+                                let ptr = core::ptr::null_mut();
+                                let new_layout = core::alloc::Layout::from_size_align_unchecked(pages << K_PAGE_SHIFT, K_PAGE_SIZE);
+                                self.dealloc(ptr, new_layout);
+                            },
+                            true => todo!("[tcmalloc] allocate an object from PageAllocator. layout = {:#?}", layout),
+                        }
+                    },
+                    TcmallocErr::PageDealloc(addr, pages) => todo!("[tcmalloc] deallocate a span by PageAllocator. layout = {:#?}", layout),
+                }
+            }
+        }
     }
 }
