@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{
-    common::{K_BASE_NUMBER_CLASSES, K_MAX_NUMBER_SPAN},
+    common::{K_BASE_NUMBER_CLASSES, K_FULL_SCALE, K_MAX_NUMBER_SPAN},
     error_handler::TransferCacheErr,
     linked_list::LinkedList,
 };
@@ -88,7 +88,7 @@ impl TransferCache {
                 free_list.push(ptr);
                 if free_list.is_full() {
                     self.full_num += 1;
-                    if self.full_num >= self.num / 2 {
+                    if self.full_num >= self.num / K_FULL_SCALE {
                         return Err(TransferCacheErr::Full);
                     }
                 }
