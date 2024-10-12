@@ -1,82 +1,85 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::alloc::{GlobalAlloc, Layout};
+use core::panic;
+
+use tcmalloc::{
+    common::{K_BASE_NUMBER_SPAN, K_PAGE_SIZE, K_PRIMARY_HEAP_LEN},
+    error_handler::TcmallocErr,
+    Tcmalloc,
+};
+
 use crate::early_println;
 
-use core::alloc::{GlobalAlloc, Layout};
+mod tcmalloc;
 
-pub mod central_free_list;
-pub mod common;
-pub mod cpu_cache;
-mod linked_list;
-pub mod page_heap;
-mod size_class;
-mod transfer_cache;
-
-struct Tcmalloc;
-
-unsafe impl GlobalAlloc for Tcmalloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let cpu = cpu_cache::get_current_cpu();
-        let cpu_cache = cpu_cache::get_current_cpu_cache(cpu);
-        let tuple = size_class::match_size_class(layout);
-        match tuple {
-            // Allocated by tcmalloc
-            Some(inner) => {
-                cpu_cache.allocate(layout.align(), inner)
-            },
-            // Allocated by page heap
-            None => {
-                todo!()
-            },
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let cpu = cpu_cache::get_current_cpu();
-        let cpu_cache = cpu_cache::get_current_cpu_cache(cpu);
-        let tuple = size_class::match_size_class(layout);
-        match tuple {
-            // Deallocated by tcmalloc
-            Some(inner) => {
-                cpu_cache.deallocate(inner, ptr);
-            },
-            // Deallocated by page heap
-            None => {
-                todo!()
-            },
-        }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        self.dealloc(ptr, layout);
-
-        let size = new_size;
-        let align = layout.align();
-        let new_layout = Layout::from_size_align_unchecked(size, align);
-
-        self.alloc(new_layout)
-    }
-}
+// FIXME: The number of cpu should be introduced at runtime.
+const K_MAX_PAGE_NUMBER: usize = 1024;
+const CPU_NUMBER: usize = 16;
+const INIT_KERNEL_HEAP_SIZE: usize = K_PAGE_SIZE * K_PRIMARY_HEAP_LEN;
 
 #[global_allocator]
-static HEAP_ALLOCATOR: Tcmalloc = Tcmalloc;
+static mut HEAP_ALLOCATOR: Tcmalloc<CPU_NUMBER> = Tcmalloc::new();
 
 #[alloc_error_handler]
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     panic!("Heap allocation error, layout = {:?}", layout);
 }
 
-const INIT_KERNEL_HEAP_SIZE: usize = common::K_PAGE_SIZE * common::K_PRIMARY_HEAP_LEN;
-
 #[repr(align(4096))]
 struct InitHeapSpace([u8; INIT_KERNEL_HEAP_SIZE]);
 
-static HEAP_SPACE: InitHeapSpace = InitHeapSpace([0; INIT_KERNEL_HEAP_SIZE]);
+static PRIMARY_HEAP: InitHeapSpace = InitHeapSpace([0; INIT_KERNEL_HEAP_SIZE]);
 
 pub fn init() {
-    unsafe { page_heap::init(HEAP_SPACE.0.as_ptr() as usize) };
-    early_println!("[tcmalloc] page_heap_base {:x}", HEAP_SPACE.0.as_ptr() as usize);
-    early_println!("[tcmalloc] page_heap_bound {:x}", HEAP_SPACE.0.as_ptr() as usize + INIT_KERNEL_HEAP_SIZE);
-    unsafe { central_free_list::init() };
-    unsafe { cpu_cache::init() };
+    // TODO: SAFETY
+    early_println!("[tcmalloc] init.");
+    unsafe { HEAP_ALLOCATOR.init(K_MAX_PAGE_NUMBER, PRIMARY_HEAP.0.as_ptr() as usize) };
+}
+
+// FIXME: Implement this function by APIs provided by 
+fn get_current_cpu() -> usize {
+    0
+}
+
+unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let cpu = get_current_cpu();
+
+        match HEAP_ALLOCATOR.allocate(cpu, layout) {
+            Ok(ptr) => ptr,
+            Err(err) => {
+                match err {
+                    TcmallocErr::Redo => self.alloc(layout),
+                    TcmallocErr::PageAlloc(pages) => {
+                        match pages > K_BASE_NUMBER_SPAN {
+                            false => todo!("[tcmalloc] allocate a span from PageAllocator."),
+                            true => todo!("[tcmalloc] allocate an object from PageAllocator."),
+                        }
+                    },
+                    TcmallocErr::PageDealloc(addr, pages) => todo!("[tcmalloc] deallocate a span by PageAllocator."),
+                }
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let cpu = get_current_cpu();
+
+        match HEAP_ALLOCATOR.deallocate(cpu, ptr, layout) {
+            Ok(()) => {},
+            Err(err) => {
+                match err {
+                    TcmallocErr::Redo => self.dealloc(ptr, layout),
+                    TcmallocErr::PageAlloc(pages) => {
+                        match pages > K_BASE_NUMBER_SPAN {
+                            false => todo!("[tcmalloc] allocate a span from PageAllocator."),
+                            true => todo!("[tcmalloc] allocate an object from PageAllocator."),
+                        }
+                    },
+                    TcmallocErr::PageDealloc(addr, pages) => todo!("[tcmalloc] deallocate a span by PageAllocator."),
+                }
+            }
+        }
+    }
 }
