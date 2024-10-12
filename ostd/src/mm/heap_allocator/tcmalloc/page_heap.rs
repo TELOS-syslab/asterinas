@@ -60,11 +60,14 @@ impl PageHeap {
 
     /// Try to allocate span with given `pages` from `PrimaryHeap`.
     /// 
-    /// Return `Some(addr)` if the `PrimaryHeap` meets the need.
+    /// Return `Ok(addr)` if the `PrimaryHeap` meets the need.
     /// 
-    /// Return `None` to indicate to allocate from `OS`.
-    pub fn alloc_pages(&mut self, pages: usize) -> Option<usize> {
-        self.try_to_match_span(pages)
+    /// Return `Err(())` to indicate to allocate from `OS`.
+    pub fn alloc_pages(&mut self, pages: usize) -> Result<usize, ()> {
+        match self.try_to_match_span(pages) {
+            None => Err(()),
+            Some(addr) => Ok(addr),
+        }
     }
 
     /// Try to deallocate span with given `pages` to `PrimaryHeap`.

@@ -17,4 +17,4 @@ pub const K_PAGE_SIZE: usize = 1 << K_PAGE_SHIFT;
 // go over its `max_len()`.
 pub const K_MAX_OVERRANGES: usize = 4;
 
-pub const K_PRIMARY_HEAP_LEN: usize = 256;
+pub const K_PRIMARY_HEAP_LEN: usize = 4 * 1024;

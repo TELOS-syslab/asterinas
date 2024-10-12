@@ -48,7 +48,7 @@ unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
 
         match HEAP_ALLOCATOR.allocate(cpu, layout) {
             Ok(ptr) => {
-                early_println!("[tcmalloc] alloc ptr = {:x}, size = {}", ptr as usize, layout.size());
+                // early_println!("[tcmalloc] alloc ptr = {:x}, size = {}", ptr as usize, layout.size());
                 ptr
             },
             Err(err) => {
@@ -71,7 +71,7 @@ unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
 
         match HEAP_ALLOCATOR.deallocate(cpu, ptr, layout) {
             Ok(()) => {
-                early_println!("[tcmalloc] dealloc ptr = {:x}, size = {}", ptr as usize, layout.size());
+                // early_println!("[tcmalloc] dealloc ptr = {:x}, size = {}", ptr as usize, layout.size());
             },
             Err(err) => {
                 match err {

@@ -10,7 +10,6 @@ use size_class::match_size_class;
 use transfer_cache::TransferCaches;
 use central_free_list::CentralFreeLists;
 use page_heap::PageHeap;
-
 mod central_free_list;
 pub mod common;
 mod cpu_cache;
@@ -52,7 +51,13 @@ impl<const C: usize> Tcmalloc<C> {
             None => {
                 let size = core::cmp::max(layout.size(), layout.align());
                 let pages = (size + K_PAGE_SIZE - 1) >> K_PAGE_SHIFT;
-                Err(TcmallocErr::PageAlloc(pages))
+                // FIXME: Lock point.
+                let page_heap = &mut self.page_heap;
+
+                match page_heap.alloc_pages(pages) {
+                    Ok(addr) => Ok(addr as *mut u8),
+                    Err(()) => Err(TcmallocErr::PageAlloc(pages)),
+                }
             },
             Some(size_class) => {
                 let align = layout.align();
@@ -62,7 +67,7 @@ impl<const C: usize> Tcmalloc<C> {
                 match cpu_cache.alloc_object_aligned(align, size_class) {
                     Ok(ptr) => Ok(ptr),
                     Err(err) => {
-                        // Lock point.
+                        // FIXME: Lock point.
                         let transfer_caches = &mut self.transfer_caches;
                         let central_free_lists = &mut self.central_free_lists;
                         let page_heap = &mut self.page_heap;
@@ -144,7 +149,14 @@ impl<const C: usize> Tcmalloc<C> {
             None => {
                 let size = layout.size();
                 let pages = (size + K_PAGE_SIZE - 1) >> K_PAGE_SHIFT;
-                Err(TcmallocErr::PageDealloc(ptr as usize, pages))
+                // FIXME: Lock point.
+                let page_heap = &mut self.page_heap;
+                let addr = ptr as usize;
+
+                match page_heap.dealloc_pages(addr, pages) {
+                    Ok(()) => Ok(()),
+                    Err(()) => Err(TcmallocErr::PageDealloc(addr, pages)),
+                }
             },
             Some(size_class) => {
                 let cpu_cache = self.cpu_caches.get_current_cpu_cache(cpu);
