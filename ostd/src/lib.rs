@@ -109,6 +109,8 @@ pub unsafe fn init() {
     arch::irq::enable_local();
 
     invoke_ffi_init_funcs();
+
+    early_println!("[tcmalloc] ostd init done.");
 }
 
 /// Indicates whether the kernel is in bootstrap context.

@@ -209,5 +209,3 @@ impl<const C: usize> Tcmalloc<C> {
         }
     }
 }
-
-unsafe impl<const C: usize> Sync for Tcmalloc<C> {}

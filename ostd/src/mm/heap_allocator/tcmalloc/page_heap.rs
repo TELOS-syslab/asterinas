@@ -76,8 +76,10 @@ impl PageHeap {
         let primary_heap = &mut self.primary_heap;
         let base = primary_heap.first().unwrap().1;
         let bound = primary_heap.last().unwrap().1 + K_PAGE_SIZE;
+        let span_base = addr;
+        let span_bound = addr + (pages << K_PAGE_SHIFT);
 
-        match addr >= base && addr < bound {
+        match span_base >= base && span_bound <= bound {
             false => Err(()),
             true => {
                 let start = (addr - base) >> K_PAGE_SHIFT;
