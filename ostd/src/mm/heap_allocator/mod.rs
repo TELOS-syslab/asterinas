@@ -47,17 +47,20 @@ unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
         let cpu = get_current_cpu();
 
         match HEAP_ALLOCATOR.allocate(cpu, layout) {
-            Ok(ptr) => ptr,
+            Ok(ptr) => {
+                early_println!("[tcmalloc] alloc ptr = {:x}, size = {}", ptr as usize, layout.size());
+                ptr
+            },
             Err(err) => {
                 match err {
                     TcmallocErr::Redo => self.alloc(layout),
                     TcmallocErr::PageAlloc(pages) => {
                         match pages > K_BASE_NUMBER_SPAN {
-                            false => todo!("[tcmalloc] allocate a span from PageAllocator."),
-                            true => todo!("[tcmalloc] allocate an object from PageAllocator."),
+                            false => todo!("[tcmalloc] allocate a span from PageAllocator. layout = {:#?}", layout),
+                            true => todo!("[tcmalloc] allocate an object from PageAllocator. layout = {:#?}", layout),
                         }
                     },
-                    TcmallocErr::PageDealloc(addr, pages) => todo!("[tcmalloc] deallocate a span by PageAllocator."),
+                    TcmallocErr::PageDealloc(addr, pages) => todo!("[tcmalloc] deallocate a span by PageAllocator. layout = {:#?}", layout),
                 }
             }
         }
@@ -67,17 +70,19 @@ unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
         let cpu = get_current_cpu();
 
         match HEAP_ALLOCATOR.deallocate(cpu, ptr, layout) {
-            Ok(()) => {},
+            Ok(()) => {
+                early_println!("[tcmalloc] dealloc ptr = {:x}, size = {}", ptr as usize, layout.size());
+            },
             Err(err) => {
                 match err {
                     TcmallocErr::Redo => self.dealloc(ptr, layout),
                     TcmallocErr::PageAlloc(pages) => {
                         match pages > K_BASE_NUMBER_SPAN {
-                            false => todo!("[tcmalloc] allocate a span from PageAllocator."),
-                            true => todo!("[tcmalloc] allocate an object from PageAllocator."),
+                            false => todo!("[tcmalloc] allocate a span from PageAllocator. layout = {:#?}", layout),
+                            true => todo!("[tcmalloc] allocate an object from PageAllocator. layout = {:#?}", layout),
                         }
                     },
-                    TcmallocErr::PageDealloc(addr, pages) => todo!("[tcmalloc] deallocate a span by PageAllocator."),
+                    TcmallocErr::PageDealloc(addr, pages) => todo!("[tcmalloc] deallocate a span by PageAllocator. layout = {:#?}", layout),
                 }
             }
         }
