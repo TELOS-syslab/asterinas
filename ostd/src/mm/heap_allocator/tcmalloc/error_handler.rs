@@ -184,6 +184,9 @@ impl CentralFreeListErr {
                     Ok(()) => Ok(()),
                     Err(err) => {
                         match err {
+                            CentralFreeListErr::Overranged => {
+                                CentralFreeListErr::resolve_overranged_err(central_free_lists, page_heap, pages)
+                            },
                             CentralFreeListErr::Oversized => {
                                 CentralFreeListErr::resolve_oversized_err(central_free_lists, page_heap, pages)
                             },

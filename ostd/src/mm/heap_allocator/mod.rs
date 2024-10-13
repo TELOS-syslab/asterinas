@@ -3,6 +3,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::panic;
 
+use tcmalloc::common::K_PAGE_SHIFT;
 use tcmalloc::{
     common::{K_BASE_NUMBER_SPAN, K_PAGE_SIZE, K_PRIMARY_HEAP_LEN},
     error_handler::TcmallocErr,
@@ -56,7 +57,14 @@ unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
                     TcmallocErr::Redo => self.alloc(layout),
                     TcmallocErr::PageAlloc(pages) => {
                         match pages > K_BASE_NUMBER_SPAN {
-                            false => todo!("[tcmalloc] allocate a span from PageAllocator. layout = {:#?}", layout),
+                            false => {
+                                todo!("[tcmalloc] allocate a span from PageAllocator.");
+                                // TODO: `ptr` points to the new span.
+                                let ptr = core::ptr::null_mut();
+                                let new_layout = core::alloc::Layout::from_size_align_unchecked(pages << K_PAGE_SHIFT, K_PAGE_SIZE);
+                                self.dealloc(ptr, new_layout);
+                                self.alloc(layout)
+                            },
                             true => todo!("[tcmalloc] allocate an object from PageAllocator. layout = {:#?}", layout),
                         }
                     },
@@ -78,7 +86,13 @@ unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
                     TcmallocErr::Redo => self.dealloc(ptr, layout),
                     TcmallocErr::PageAlloc(pages) => {
                         match pages > K_BASE_NUMBER_SPAN {
-                            false => todo!("[tcmalloc] allocate a span from PageAllocator. layout = {:#?}", layout),
+                            false => {
+                                todo!("[tcmalloc] allocate a span from PageAllocator.");
+                                // TODO: `ptr` points to the new span.
+                                let ptr = core::ptr::null_mut();
+                                let new_layout = core::alloc::Layout::from_size_align_unchecked(pages << K_PAGE_SHIFT, K_PAGE_SIZE);
+                                self.dealloc(ptr, new_layout);
+                            },
                             true => todo!("[tcmalloc] allocate an object from PageAllocator. layout = {:#?}", layout),
                         }
                     },
