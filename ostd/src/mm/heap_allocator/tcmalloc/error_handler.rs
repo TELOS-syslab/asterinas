@@ -175,7 +175,7 @@ impl CentralFreeListErr {
     /// 
     /// May return: `Ok(())`, `Err(TcmallocErr::PageAlloc(pages))`, `Err(TcmallocErr::PageDealloc(addr, pages))`, `Err(TcmallocErr::Overlay)`.
     pub fn resolve_empty_err(central_free_lists: &mut CentralFreeLists, page_heap: &mut PageHeap, pages: usize) -> Result<(), TcmallocErr> {
-        assert_eq!(pages < K_BASE_NUMBER_SPAN, true);
+        assert_eq!(pages <= K_BASE_NUMBER_SPAN, true);
 
         match page_heap.try_to_match_span(pages) {
             None => Err(TcmallocErr::PageAlloc(pages)),
@@ -205,7 +205,7 @@ impl CentralFreeListErr {
     ///  
     /// May return: `Ok(())`, `Err(TcmallocErr::PageDealloc(addr, pages))`.
     pub fn resolve_overranged_err(central_free_lists: &mut CentralFreeLists, page_heap: &mut PageHeap, pages: usize) -> Result<(), TcmallocErr> {
-        assert_eq!(pages < K_BASE_NUMBER_SPAN, true);
+        assert_eq!(pages <= K_BASE_NUMBER_SPAN, true);
 
         while let Ok(ptr) = central_free_lists.alloc_span(pages) {
             let addr = ptr as usize;
@@ -223,7 +223,7 @@ impl CentralFreeListErr {
     /// 
     /// May return: `Ok(())`, `Err(TcmallocErr::PageDealloc(addr, pages))`.
     pub fn resolve_oversized_err(central_free_lists: &mut CentralFreeLists, page_heap: &mut PageHeap, pages: usize) -> Result<(), TcmallocErr> {
-        assert_eq!(pages < K_BASE_NUMBER_SPAN, true);
+        assert_eq!(pages <= K_BASE_NUMBER_SPAN, true);
 
         while central_free_lists.len() > central_free_lists.max_len() {
             match central_free_lists.find_smallest_color() {
