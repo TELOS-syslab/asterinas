@@ -10,6 +10,7 @@ use size_class::match_size_class;
 use transfer_cache::TransferCaches;
 use central_free_list::CentralFreeLists;
 use page_heap::PageHeap;
+
 mod central_free_list;
 pub mod common;
 mod cpu_cache;
@@ -52,11 +53,38 @@ impl<const C: usize> Tcmalloc<C> {
                 let size = core::cmp::max(layout.size(), layout.align());
                 let pages = (size + K_PAGE_SIZE - 1) >> K_PAGE_SHIFT;
                 // FIXME: Lock point.
+                let central_free_lists = &mut self.central_free_lists;
                 let page_heap = &mut self.page_heap;
 
-                match page_heap.alloc_pages(pages) {
-                    Ok(addr) => Ok(addr as *mut u8),
-                    Err(()) => Err(TcmallocErr::PageAlloc(pages)),
+                match pages <= K_BASE_NUMBER_SPAN {
+                    false => {
+                        match page_heap.alloc_pages(pages) {
+                            Ok(addr) => Ok(addr as *mut u8),
+                            Err(()) => Err(TcmallocErr::PageAlloc(pages)),
+                        }
+                    },
+                    true => {
+                        match central_free_lists.alloc_span(pages) {
+                            Ok(ptr) => Ok(ptr as *mut u8),
+                            Err(err) => {
+                                match err {
+                                    CentralFreeListErr::Empty => {
+                                        if let Err(err) = CentralFreeListErr::resolve_empty_err(central_free_lists, page_heap, pages) {
+                                            return Err(err);
+                                        }
+                                    },
+                                    CentralFreeListErr::Unsupported(addr, pages) => {
+                                        if let Err(err) = CentralFreeListErr::resolve_unsupported_err(addr, pages) {
+                                            return Err(err);
+                                        }
+                                    },
+                                    _ => panic!("[tcmalloc] returned unexpected error!"),
+                                }
+
+                                Err(TcmallocErr::Redo)
+                            },
+                        }
+                    },
                 }
             },
             Some(size_class) => {
