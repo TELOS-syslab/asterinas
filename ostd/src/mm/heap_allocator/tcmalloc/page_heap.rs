@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::common::{K_PAGE_SHIFT, K_PAGE_SIZE, K_PRIMARY_HEAP_LEN};
+use super::{
+    common::{K_PAGE_SHIFT, K_PAGE_SIZE, K_PRIMARY_HEAP_LEN},
+    error_handler::PageHeapErr,
+};
 
 pub struct PageHeap {
     primary_heap: [(bool, usize); K_PRIMARY_HEAP_LEN],
@@ -62,10 +65,10 @@ impl PageHeap {
     /// 
     /// Return `Ok(addr)` if the `PrimaryHeap` meets the need.
     /// 
-    /// Return `Err(())` to indicate to allocate from `OS`.
-    pub fn alloc_pages(&mut self, pages: usize) -> Result<usize, ()> {
+    /// Return `Err(PageHeapErr::Unsupported)` to indicate to allocate from `OS`.
+    pub fn alloc_pages(&mut self, pages: usize) -> Result<usize, PageHeapErr> {
         match self.try_to_match_span(pages) {
-            None => Err(()),
+            None => Err(PageHeapErr::Unsupported),
             Some(addr) => Ok(addr),
         }
     }
@@ -74,8 +77,8 @@ impl PageHeap {
     /// 
     /// Return `Ok(())` if the `PrimaryHeap` meets the need.
     /// 
-    /// Return `Err(())` to indicate to deallocate to `OS`.
-    pub fn dealloc_pages(&mut self, addr: usize, pages: usize) -> Result<(), ()> {
+    /// Return `Err(PageHeapErr::Unsupported)` to indicate to deallocate to `OS`.
+    pub fn dealloc_pages(&mut self, addr: usize, pages: usize) -> Result<(), PageHeapErr> {
         let primary_heap = &mut self.primary_heap;
         let base = primary_heap.first().unwrap().1;
         let bound = primary_heap.last().unwrap().1 + K_PAGE_SIZE;
@@ -83,7 +86,7 @@ impl PageHeap {
         let span_bound = addr + (pages << K_PAGE_SHIFT);
 
         match span_base >= base && span_bound <= bound {
-            false => Err(()),
+            false => Err(PageHeapErr::Unsupported),
             true => {
                 let start = (addr - base) >> K_PAGE_SHIFT;
 
@@ -93,7 +96,7 @@ impl PageHeap {
                 }
 
                 Ok(())
-            },
+            }
         }
     }
 }
