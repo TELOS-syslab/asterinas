@@ -14,8 +14,10 @@ pub struct CentralFreeLists {
 
 impl CentralFreeLists {
     pub const fn new() -> Self {
+        const ARRAY_REPEAT_VALUE: ElasticList = ElasticList::new();
+
         Self {
-            free_lists: [ElasticList::new(); K_BASE_NUMBER_SPAN],
+            free_lists: [ARRAY_REPEAT_VALUE; K_BASE_NUMBER_SPAN],
             pages: 0,
             max_pages: 0,
         }

@@ -49,6 +49,7 @@ fn get_current_cpu() -> usize {
 
 unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // early_println!("[tcmalloc] alloc, layout = {:#?}", layout);
         let cpu = get_current_cpu();
 
         match HEAP_ALLOCATOR.allocate(cpu, layout) {
@@ -105,6 +106,8 @@ unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // early_println!("[tcmalloc] dealloc, layout = {:#?}", layout);
+
         let cpu = get_current_cpu();
 
         match HEAP_ALLOCATOR.deallocate(cpu, ptr, layout) {

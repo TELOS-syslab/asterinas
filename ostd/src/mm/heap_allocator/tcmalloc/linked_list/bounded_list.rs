@@ -2,7 +2,6 @@
 
 use buddy_system_allocator::linked_list::LinkedList;
 
-#[derive(Clone, Copy)]
 pub struct BoundedList {
     list: LinkedList,
     len: usize,
@@ -32,6 +31,8 @@ impl BoundedList {
     }
 
     pub fn reset(&mut self) {
+        assert_eq!(self.is_empty(), true);
+
         self.len = 0;
         self.max_len = 0;
         self.color = 0;

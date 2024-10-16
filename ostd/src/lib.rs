@@ -21,6 +21,7 @@
 #![feature(sync_unsafe_cell)]
 #![feature(allocator_api)]
 #![feature(pointer_is_aligned_to)]
+#![feature(linked_list_remove)]
 // The `generic_const_exprs` feature is incomplete however required for the page table
 // const generic implementation. We are using this feature in a conservative manner.
 #![allow(incomplete_features)]

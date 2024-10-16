@@ -7,7 +7,6 @@ use super::{
     size_class::{get_size_class_info, SizeClassInfo},
 };
 
-#[derive(Clone, Copy)]
 pub struct CpuCache {
     free_lists: [ElasticList; K_BASE_NUMBER_CLASSES],
     size: usize,
@@ -16,8 +15,10 @@ pub struct CpuCache {
 
 impl CpuCache {
     const fn new() -> Self {
+        const ARRAY_REPEAT_VALUE: ElasticList = ElasticList::new();
+
         Self {
-            free_lists: [ElasticList::new(); K_BASE_NUMBER_CLASSES],
+            free_lists: [ARRAY_REPEAT_VALUE; K_BASE_NUMBER_CLASSES],
             size: 0,
             max_size: 0,
         }
@@ -155,8 +156,10 @@ pub struct CpuCaches<const C: usize> {
 
 impl<const C: usize> CpuCaches<C> {
     pub const fn new() -> Self {
+        const ARRAY_REPEAT_VALUE: CpuCache = CpuCache::new();
+
         Self {
-            cpu_caches: [CpuCache::new(); C],
+            cpu_caches: [ARRAY_REPEAT_VALUE; C],
         }
     }
 

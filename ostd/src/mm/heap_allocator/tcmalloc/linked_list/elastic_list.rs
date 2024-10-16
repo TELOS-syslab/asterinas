@@ -2,7 +2,6 @@
 
 use buddy_system_allocator::linked_list::LinkedList;
 
-#[derive(Clone, Copy)]
 pub struct ElasticList {
     list: LinkedList,
     len: usize,

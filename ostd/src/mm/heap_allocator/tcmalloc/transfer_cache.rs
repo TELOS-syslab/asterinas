@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::early_println;
-
 use super::{
     common::{K_BASE_NUMBER_CLASSES, K_FULL_SCALE, K_MAX_NUMBER_SPAN},
     error_handler::TransferCacheErr,
     linked_list::BoundedList,
 };
 
-#[derive(Clone, Copy)]
 pub struct TransferCache {
     free_lists: [BoundedList; K_MAX_NUMBER_SPAN],
     num: usize,
@@ -17,8 +14,10 @@ pub struct TransferCache {
 
 impl TransferCache {
     const fn new() -> Self {
+        const ARRAY_REPEAT_VALUE: BoundedList = BoundedList::new();
+
         Self {
-            free_lists: [BoundedList::new(); K_MAX_NUMBER_SPAN],
+            free_lists: [ARRAY_REPEAT_VALUE; K_MAX_NUMBER_SPAN],
             num: 0,
             full_num: 0,
         }
@@ -189,8 +188,10 @@ pub struct TransferCaches {
 
 impl TransferCaches {
     pub const fn new() -> Self {
+        const ARRAY_REPEAT_VALUE: TransferCache = TransferCache::new();
+
         Self {
-            transfer_caches: [TransferCache::new(); K_BASE_NUMBER_CLASSES],
+            transfer_caches: [ARRAY_REPEAT_VALUE; K_BASE_NUMBER_CLASSES],
         }
     }
 
