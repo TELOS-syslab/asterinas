@@ -13,7 +13,8 @@
 use log::{LevelFilter, Metadata, Record};
 
 use crate::{
-    boot::{kcmdline::ModuleArg, kernel_cmdline}, early_println, timer::Jiffies
+    boot::{kcmdline::ModuleArg, kernel_cmdline},
+    timer::Jiffies,
 };
 
 const LOGGER: Logger = Logger {};

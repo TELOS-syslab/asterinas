@@ -7,14 +7,18 @@ use core::{
 
 use tcmalloc::{
     common::{K_PAGE_SHIFT, K_PAGE_SIZE, K_PRIMARY_HEAP_LEN},
-    error_handler::TcmallocErr,
+    status::{FlowMod, MetaStat},
     Tcmalloc,
 };
 
 use super::{page::meta::mapping, Vaddr};
 use crate::{
     early_println,
-    mm::{kspace::LINEAR_MAPPING_BASE_VADDR, paddr_to_vaddr, page::{allocator::PAGE_ALLOCATOR, Page}},
+    mm::{
+        kspace::LINEAR_MAPPING_BASE_VADDR,
+        paddr_to_vaddr,
+        page::{allocator::PAGE_ALLOCATOR, Page},
+    },
 };
 
 mod tcmalloc;
@@ -38,6 +42,7 @@ struct InitHeapSpace([u8; INIT_KERNEL_HEAP_SIZE]);
 static PRIMARY_HEAP: InitHeapSpace = InitHeapSpace([0; INIT_KERNEL_HEAP_SIZE]);
 
 pub fn init() {
+    early_println!("[tcmalloc] init.");
     // TODO: SAFETY
     unsafe { HEAP_ALLOCATOR.init(K_MAX_PAGE_NUMBER, PRIMARY_HEAP.0.as_ptr() as usize) };
 }
@@ -49,85 +54,26 @@ fn get_current_cpu() -> usize {
 
 unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // early_println!("[tcmalloc] alloc, layout = {:#?}", layout);
+        early_println!("[tcmalloc] alloc, layout = {:#?}.", layout);
+        let mut _meta_seed = Some(MetaStat::Alloc(layout));
         let cpu = get_current_cpu();
-
-        match HEAP_ALLOCATOR.allocate(cpu, layout) {
-            Ok(ptr) => {
-                ptr
-            }
-            Err(err) => {
-                let mut pages = 0usize;
-
-                match err {
-                    TcmallocErr::PageAlloc(_pages) => pages = _pages,
-                    TcmallocErr::SpanAlloc(_pages) => pages = _pages,
-                    TcmallocErr::PageDealloc(_addr, _pages) => {
-                        panic!("Should not reach here while allocating.");
-                    }
+        let mut rslt = core::ptr::null_mut();
+        loop {
+            early_println!("[tcmalloc] meta_stat = {:#?}", HEAP_ALLOCATOR.stat(cpu));
+            match HEAP_ALLOCATOR.stat_handler(cpu, _meta_seed.clone()) {
+                FlowMod::Backward => {
+                    panic!();
                 }
-
-                // TODO: Change to the Latest API after the
-                // latest commits merged.
-                let new_layout = core::alloc::Layout::from_size_align(
-                    pages << K_PAGE_SHIFT,
-                    K_PAGE_SIZE,
-                )
-                .unwrap();
-
-                // let pages = crate::mm::page::allocator::alloc_contiguous(layout, metadata_fn);
-                // let pages = core::mem::ManuallyDrop::new(pages);
-                // let addr = pages.paddr();
-
-                let paddr_from_page_allocator = PAGE_ALLOCATOR
-                    .get()
-                    .unwrap()
-                    .lock()
-                    .alloc(
-                        new_layout
-                    )
-                    .expect("Failed to allocate a span from PageAllocator.");
-                
-
-                // `ptr` points to the new span.
-                let ptr = paddr_to_vaddr(paddr_from_page_allocator) as *mut u8;
-
-                match err {
-                    TcmallocErr::PageAlloc(_pages) => ptr,
-                    TcmallocErr::SpanAlloc(_pages) => {
-                        HEAP_ALLOCATOR.refill_span_and_redo(cpu, ptr, layout, pages).unwrap()
-                    }
-                    TcmallocErr::PageDealloc(_addr, _pages) => {
-                        panic!("Should not reach here while allocating.");
-                    }
+                FlowMod::Circle => continue,
+                FlowMod::Exit => break,
+                FlowMod::Forward => {
+                    rslt = HEAP_ALLOCATOR.take_object(cpu).unwrap();
                 }
             }
         }
+        early_println!("[tcmalloc] rslt = {:x}", rslt as usize);
+        rslt
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // early_println!("[tcmalloc] dealloc, layout = {:#?}", layout);
-
-        let cpu = get_current_cpu();
-
-        match HEAP_ALLOCATOR.deallocate(cpu, ptr, layout) {
-            Ok(()) => {}
-            Err(err) => match err {
-                TcmallocErr::PageAlloc(_) => {
-                    panic!("Should not reach here while deallocating.");
-                }
-                TcmallocErr::SpanAlloc(_) => {
-                    panic!("Should not reach here while deallocating.");
-                }
-                TcmallocErr::PageDealloc(addr, pages) => {
-                    // crate::early_println!("addr: {:x}", addr);
-                    // let page = Page::<KernelMeta>::from_raw(addr - LINEAR_MAPPING_BASE_VADDR);
-                    PAGE_ALLOCATOR.get().unwrap().lock().dealloc(
-                        addr - LINEAR_MAPPING_BASE_VADDR,
-                        pages,
-                    );
-                }
-            }
-        }
-    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {}
 }
