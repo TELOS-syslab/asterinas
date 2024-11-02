@@ -63,9 +63,6 @@ impl TransferCache {
             TransferCacheStat::Empty => {
                 self.refill_span();
             }
-            TransferCacheStat::Finish => {
-                self.taken();
-            }
             TransferCacheStat::Lack => {
                 self.refill_free_list();
             }
@@ -80,14 +77,13 @@ impl TransferCache {
             }
         }
         match self.stat() {
-            TransferCacheStat::Finish => FlowMod::Forward,
+            TransferCacheStat::Ready => FlowMod::Forward,
             TransferCacheStat::Alloc
             | TransferCacheStat::Dealloc
             | TransferCacheStat::Oversized => FlowMod::Circle,
             TransferCacheStat::Empty | TransferCacheStat::Lack | TransferCacheStat::Scavenge => {
                 FlowMod::Backward
             }
-            TransferCacheStat::Ready => FlowMod::Exit,
         }
     }
 
@@ -122,7 +118,7 @@ impl TransferCache {
             }
         } else {
             self.transfer_batch = Some(transfer_batch);
-            self.set_stat(TransferCacheStat::Finish);
+            self.set_stat(TransferCacheStat::Ready);
         }
     }
 
@@ -182,12 +178,6 @@ impl TransferCache {
         self.set_stat(TransferCacheStat::Empty);
     }
 
-    fn taken(&mut self) {
-        if self.transfer_batch.is_none() {
-            self.set_stat(TransferCacheStat::Ready);
-        }
-    }
-
     /// Return the idex of `BoundedList` which covering the given `ptr`.
     pub fn match_span(&self, ptr: *mut usize) -> Option<usize> {
         let addr = ptr as usize;
@@ -204,9 +194,7 @@ impl TransferCache {
         let mut hot = core::usize::MAX;
         let mut color = 0usize;
         for (idx, free_list) in self.free_lists.iter().enumerate() {
-            if !free_list.is_empty()
-            /*&& free_list.color() >= color*/
-            {
+            if !free_list.is_empty() && free_list.color() >= color {
                 hot = idx;
                 color = free_list.color();
             }

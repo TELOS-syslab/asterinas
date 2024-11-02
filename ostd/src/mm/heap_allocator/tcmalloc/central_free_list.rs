@@ -51,9 +51,6 @@ impl CentralFreeList {
             CentralFreeListStat::Empty => {
                 self.refill_span();
             }
-            CentralFreeListStat::Finish => {
-                self.taken();
-            }
             CentralFreeListStat::Overranged => {
                 self.scavenge_batch();
             }
@@ -65,12 +62,11 @@ impl CentralFreeList {
             }
         }
         match self.stat() {
-            CentralFreeListStat::Finish => FlowMod::Forward,
+            CentralFreeListStat::Ready => FlowMod::Forward,
             CentralFreeListStat::Alloc
             | CentralFreeListStat::Dealloc
             | CentralFreeListStat::Overranged => FlowMod::Circle,
             CentralFreeListStat::Empty | CentralFreeListStat::Scavenge => FlowMod::Backward,
-            CentralFreeListStat::Ready => FlowMod::Exit,
         }
     }
 
@@ -84,7 +80,7 @@ impl CentralFreeList {
     fn alloc_span(&mut self) {
         if let Some(ptr) = self.free_list.pop() {
             self.transfer_span = Some(Span::new(self.span_idx + 1, ptr as usize));
-            self.set_stat(CentralFreeListStat::Finish);
+            self.set_stat(CentralFreeListStat::Ready);
         } else {
             self.set_stat(CentralFreeListStat::Empty);
         }
@@ -131,13 +127,7 @@ impl CentralFreeList {
         if self.transfer_span.is_none() {
             return;
         }
-        self.set_stat(CentralFreeListStat::Finish);
-    }
-
-    fn taken(&mut self) {
-        if self.transfer_span.is_none() {
-            self.set_stat(CentralFreeListStat::Ready);
-        }
+        self.set_stat(CentralFreeListStat::Ready);
     }
 
     pub fn stat(&self) -> CentralFreeListStat {
@@ -198,17 +188,14 @@ impl CentralFreeLists {
             CentralFreeListMetaStat::Empty => {
                 self.refill_list();
             }
-            CentralFreeListMetaStat::Finish => {
-                self.taken();
-            }
             CentralFreeListMetaStat::Ready => {
                 self.seed(stat);
             }
         }
         match self.stat() {
-            CentralFreeListMetaStat::Finish => FlowMod::Forward,
+            CentralFreeListMetaStat::Ready => FlowMod::Forward,
             CentralFreeListMetaStat::Alloc => FlowMod::Circle,
-            CentralFreeListMetaStat::Empty | CentralFreeListMetaStat::Ready => FlowMod::Backward,
+            CentralFreeListMetaStat::Empty => FlowMod::Backward,
         }
     }
 
@@ -221,7 +208,7 @@ impl CentralFreeLists {
     fn alloc_list(&mut self) {
         if let Some(ptr) = self.free_bounded_lists.pop() {
             self.transfer_list = Some(ptr as *mut BoundedList);
-            self.set_stat(CentralFreeListMetaStat::Finish);
+            self.set_stat(CentralFreeListMetaStat::Ready);
         } else {
             self.set_stat(CentralFreeListMetaStat::Empty);
         }
@@ -239,12 +226,6 @@ impl CentralFreeLists {
             self.free_bounded_lists.push(addr as *mut usize);
         }
         self.set_stat(CentralFreeListMetaStat::Alloc);
-    }
-
-    fn taken(&mut self) {
-        if self.transfer_list.is_none() {
-            self.set_stat(CentralFreeListMetaStat::Ready);
-        }
     }
 
     pub fn stat(&self) -> CentralFreeListMetaStat {

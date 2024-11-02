@@ -9,6 +9,7 @@ use super::{
 pub struct PageHeap {
     primary_heap: [(bool, usize); K_PRIMARY_HEAP_LEN],
     stat: PageHeapStat,
+    reg: PageHeapReg,
     transfer_span: Option<Span>,
 }
 
@@ -17,6 +18,7 @@ impl PageHeap {
         Self {
             primary_heap: [(false, 0); K_PRIMARY_HEAP_LEN],
             stat: PageHeapStat::Ready,
+            reg: PageHeapReg::new(),
             transfer_span: None,
         }
     }
@@ -32,6 +34,10 @@ impl PageHeap {
         }
     }
 
+    pub fn set_pages(&mut self, pages: usize) {
+        self.reg.pages = Some(pages);
+    }
+
     pub fn put_span(&mut self, transfer_span: Option<Span>) {
         self.transfer_span = Some(transfer_span.unwrap());
     }
@@ -42,16 +48,13 @@ impl PageHeap {
 
     pub fn stat_handler(&mut self, stat: Option<PageHeapStat>) -> FlowMod {
         match self.stat() {
-            PageHeapStat::Alloc(pages) => {
-                self.alloc_pages(pages);
+            PageHeapStat::Alloc => {
+                self.alloc_pages();
             }
-            PageHeapStat::Dealloc(pages, ptr) => {
-                self.dealloc_pages(ptr as usize, pages);
+            PageHeapStat::Dealloc => {
+                self.dealloc_pages();
             }
-            PageHeapStat::Finish => {
-                self.taken();
-            }
-            PageHeapStat::Insufficient(_) => {
+            PageHeapStat::Insufficient => {
                 self.refill_pages();
             }
             PageHeapStat::Ready => {
@@ -62,10 +65,9 @@ impl PageHeap {
             }
         }
         match self.stat() {
-            PageHeapStat::Finish => FlowMod::Forward,
-            PageHeapStat::Alloc(_) | PageHeapStat::Dealloc(_, _) => FlowMod::Circle,
-            PageHeapStat::Insufficient(_) | PageHeapStat::Uncovered => FlowMod::Backward,
-            PageHeapStat::Ready => FlowMod::Exit,
+            PageHeapStat::Ready => FlowMod::Forward,
+            PageHeapStat::Alloc | PageHeapStat::Dealloc => FlowMod::Circle,
+            PageHeapStat::Insufficient | PageHeapStat::Uncovered => FlowMod::Backward,
         }
     }
 
@@ -110,17 +112,20 @@ impl PageHeap {
     }
 
     /// Try to allocate span with given `pages` from `PrimaryHeap`.
-    fn alloc_pages(&mut self, pages: usize) {
+    fn alloc_pages(&mut self) {
+        let pages = self.reg.pages.unwrap();
         if let Some(start) = self.try_to_match_span(pages) {
             self.transfer_span = Some(Span::new(pages, start));
-            self.set_stat(PageHeapStat::Finish);
+            self.set_stat(PageHeapStat::Ready);
         } else {
-            self.set_stat(PageHeapStat::Insufficient(pages));
+            self.set_stat(PageHeapStat::Insufficient);
         }
     }
 
     /// Try to deallocate span with given `pages` to `PrimaryHeap`.
-    fn dealloc_pages(&mut self, addr: usize, pages: usize) {
+    fn dealloc_pages(&mut self) {
+        let addr = self.reg.ptr.unwrap() as usize;
+        let pages = self.reg.pages.unwrap();
         let primary_heap = &mut self.primary_heap;
         let base = primary_heap.first().unwrap().1;
         let bound = primary_heap.last().unwrap().1 + K_PAGE_SIZE;
@@ -140,17 +145,11 @@ impl PageHeap {
         }
     }
 
-    fn taken(&mut self) {
-        if self.transfer_span.is_none() {
-            self.set_stat(PageHeapStat::Ready);
-        }
-    }
-
     fn refill_pages(&mut self) {
         if self.transfer_span.is_none() {
             return;
         }
-        self.set_stat(PageHeapStat::Finish);
+        self.set_stat(PageHeapStat::Ready);
     }
 
     fn scavenged(&mut self) {
@@ -165,5 +164,23 @@ impl PageHeap {
 
     pub fn set_stat(&mut self, stat: PageHeapStat) {
         self.stat = stat;
+    }
+}
+
+struct PageHeapReg {
+    ptr: Option<*mut usize>,
+    pages: Option<usize>,
+}
+
+impl PageHeapReg {
+    const fn new() -> Self {
+        Self {
+            ptr: None,
+            pages: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
     }
 }

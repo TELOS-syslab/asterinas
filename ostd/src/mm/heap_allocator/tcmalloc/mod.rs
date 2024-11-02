@@ -27,6 +27,7 @@ pub struct Tcmalloc<const C: usize> {
     central_free_lists: CentralFreeLists,
     page_heap: PageHeap,
     stat: [MetaStat; C],
+    reg: [MetaReg; C],
     transfer_span: [Option<Span>; C],
     transfer_object: [Option<*mut u8>; C],
 }
@@ -34,6 +35,7 @@ pub struct Tcmalloc<const C: usize> {
 impl<const C: usize> Tcmalloc<C> {
     pub const fn new() -> Self {
         const STAT_REPEAT_VALUE: MetaStat = MetaStat::Ready;
+        const REG_REPEAT_VALUE: MetaReg = MetaReg::new();
         const SPAN_REPEAT_VALUE: Option<Span> = None;
         Self {
             cpu_caches: CpuCaches::new(),
@@ -41,6 +43,7 @@ impl<const C: usize> Tcmalloc<C> {
             central_free_lists: CentralFreeLists::new(),
             page_heap: PageHeap::new(),
             stat: [STAT_REPEAT_VALUE; C],
+            reg: [REG_REPEAT_VALUE; C],
             transfer_span: [SPAN_REPEAT_VALUE; C],
             transfer_object: [None; C],
         }
@@ -72,8 +75,8 @@ impl<const C: usize> Tcmalloc<C> {
 
     pub fn stat_handler(&mut self, cpu: usize, stat: Option<MetaStat>) -> FlowMod {
         match self.stat(cpu) {
-            MetaStat::Alloc(layout) => {
-                self.allocate(cpu, layout);
+            MetaStat::Alloc => {
+                self.allocate(cpu);
             }
             MetaStat::Dealloc(ptr, layout) => {
                 self.deallocate(cpu, ptr, layout);
@@ -111,13 +114,15 @@ impl<const C: usize> Tcmalloc<C> {
     }
 
     /// Try to allocate a sized object meeting the need of given `layout`.
-    fn allocate(&mut self, cpu: usize, layout: Layout) {
+    fn allocate(&mut self, cpu: usize) {
+        let layout = self.reg[cpu].layout.unwrap();
         match match_size_class(layout) {
             None => {
                 let size = layout.size();
                 let pages = (size + K_PAGE_SIZE - 1) >> K_PAGE_SHIFT;
                 if pages > K_BASE_NUMBER_SPAN {
-                    self.set_stat(cpu, MetaStat::LargeSize(pages));
+                    self.reg[cpu].pages = Some(pages);
+                    self.set_stat(cpu, MetaStat::LargeSize);
                 } else {
                     let mut _central_free_list_seed = Some(CentralFreeListStat::Alloc);
                     let mut _page_heap_seed: Option<PageHeapStat> = None;
@@ -126,21 +131,21 @@ impl<const C: usize> Tcmalloc<C> {
                             .central_free_lists
                             .get_current_central_free_list(pages - 1);
                         match central_free_list.stat_handler(_central_free_list_seed.clone()) {
-                            FlowMod::Backward => _page_heap_seed = Some(PageHeapStat::Alloc(pages)),
-                            FlowMod::Circle => {}
-                            FlowMod::Exit => break,
+                            FlowMod::Backward => {
+                                _page_heap_seed = Some(PageHeapStat::Alloc);
+                                self.page_heap.set_pages(pages);
+                            }
+                            FlowMod::Circle => continue,
                             FlowMod::Forward => {
                                 let object =
                                     Some(central_free_list.take_span().unwrap().start() as *mut u8);
                                 self.put_object(cpu, object);
+                                break;
                             }
                         }
 
-                        if let Some(seed) = _page_heap_seed.clone() {
-                            match seed {
-                                PageHeapStat::Ready => continue,
-                                _ => {}
-                            }
+                        if _page_heap_seed.is_none() {
+                            continue;
                         }
                         let central_free_list = self
                             .central_free_lists
@@ -148,10 +153,10 @@ impl<const C: usize> Tcmalloc<C> {
                         let page_heap = &mut self.page_heap;
                         match page_heap.stat_handler(_page_heap_seed.clone()) {
                             FlowMod::Backward => break,
-                            FlowMod::Circle => {}
-                            FlowMod::Exit => _page_heap_seed = Some(PageHeapStat::Ready),
+                            FlowMod::Circle => continue,
                             FlowMod::Forward => {
                                 central_free_list.put_span(page_heap.take_span());
+                                continue;
                             }
                         }
                     }
@@ -328,5 +333,25 @@ impl<const C: usize> Tcmalloc<C> {
 
     pub fn set_stat(&mut self, cpu: usize, stat: MetaStat) {
         self.stat[cpu] = stat;
+    }
+}
+
+struct MetaReg {
+    layout: Option<Layout>,
+    ptr: Option<*mut u8>,
+    pages: Option<usize>,
+}
+
+impl MetaReg {
+    const fn new() -> Self {
+        Self {
+            layout: None,
+            ptr: None,
+            pages: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
     }
 }

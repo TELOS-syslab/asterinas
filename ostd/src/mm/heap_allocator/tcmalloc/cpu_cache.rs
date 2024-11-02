@@ -12,6 +12,7 @@ pub struct CpuCache {
     size: usize,
     max_size: usize,
     stat: CpuCacheStat,
+    reg: CpuCacheReg,
     transfer_batch: Option<TransferBatch>,
     transfer_object: Option<*mut u8>,
 }
@@ -25,6 +26,7 @@ impl CpuCache {
             size: 0,
             max_size: 0,
             stat: CpuCacheStat::Ready,
+            reg: CpuCacheReg::new(),
             transfer_batch: None,
             transfer_object: None,
         }
@@ -49,39 +51,35 @@ impl CpuCache {
 
     pub fn stat_handler(&mut self, stat: Option<CpuCacheStat>) -> FlowMod {
         match self.stat() {
-            CpuCacheStat::Alloc(idx, align) => {
-                self.alloc_aligned_object(idx, align);
+            CpuCacheStat::Alloc => {
+                self.alloc_aligned_object();
             }
-            CpuCacheStat::Dealloc(idx, ptr) => {
-                self.dealloc_object(idx, ptr);
+            CpuCacheStat::Dealloc => {
+                self.dealloc_object();
             }
-            CpuCacheStat::Finish => {
-                self.taken();
+            CpuCacheStat::Insufficient => {
+                self.refill_batch();
             }
-            CpuCacheStat::Insufficient(idx, align) => {
-                self.refill_batch(idx, align);
-            }
-            CpuCacheStat::Overranged(idx) => {
-                self.scavenge_batch(idx);
+            CpuCacheStat::Overranged => {
+                self.scavenge_batch(None);
             }
             CpuCacheStat::Oversized => {
-                self.scavenge_batch(self.cold().unwrap());
+                self.scavenge_batch(Some(self.cold().unwrap()));
             }
             CpuCacheStat::Ready => {
                 self.seed(stat);
             }
-            CpuCacheStat::Scavenge(idx) => {
-                self.scavenged(idx);
+            CpuCacheStat::Scavenge => {
+                self.scavenged();
             }
         }
         match self.stat() {
-            CpuCacheStat::Finish => FlowMod::Forward,
-            CpuCacheStat::Alloc(_, _)
-            | CpuCacheStat::Dealloc(_, _)
-            | CpuCacheStat::Overranged(_)
+            CpuCacheStat::Ready => FlowMod::Forward,
+            CpuCacheStat::Alloc
+            | CpuCacheStat::Dealloc
+            | CpuCacheStat::Overranged
             | CpuCacheStat::Oversized => FlowMod::Circle,
-            CpuCacheStat::Insufficient(_, _) | CpuCacheStat::Scavenge(_) => FlowMod::Backward,
-            CpuCacheStat::Ready => FlowMod::Exit,
+            CpuCacheStat::Insufficient | CpuCacheStat::Scavenge => FlowMod::Backward,
         }
     }
 
@@ -92,18 +90,25 @@ impl CpuCache {
     }
 
     /// Allocate an aligned object from the current `CpuCache`.
-    fn alloc_aligned_object(&mut self, idx: usize, align: usize) {
+    fn alloc_aligned_object(&mut self) {
+        let idx = self.reg.idx.unwrap();
+        let align = self.reg.align.unwrap();
         match self.pop_aligned(idx, align) {
-            None => self.set_stat(CpuCacheStat::Insufficient(idx, align)),
+            None => self.set_stat(CpuCacheStat::Insufficient),
             Some(ptr) => {
                 self.transfer_object = Some(ptr as *mut u8);
-                self.set_stat(CpuCacheStat::Finish);
+                self.set_stat(CpuCacheStat::Ready);
             }
         }
     }
 
     /// Scavenge a batch of free object to `TransferCache`.
-    fn scavenge_batch(&mut self, idx: usize) {
+    fn scavenge_batch(&mut self, idx: Option<usize>) {
+        let idx = if let Some(index) = idx {
+            index
+        } else {
+            self.reg.idx.unwrap()
+        };
         let mut transfer_batch = TransferBatch::new(get_num_to_move(idx).unwrap());
         loop {
             match self.pop(idx) {
@@ -119,13 +124,14 @@ impl CpuCache {
             }
         }
         self.transfer_batch = Some(transfer_batch);
-        self.set_stat(CpuCacheStat::Scavenge(idx));
+        self.set_stat(CpuCacheStat::Scavenge);
     }
 
-    fn scavenged(&mut self, idx: usize) {
+    fn scavenged(&mut self) {
+        let idx = self.reg.idx.unwrap();
         if self.transfer_batch.is_none() {
             if self.overranged(idx) {
-                self.set_stat(CpuCacheStat::Overranged(idx));
+                self.set_stat(CpuCacheStat::Overranged);
             } else if self.oversized() {
                 self.set_stat(CpuCacheStat::Oversized);
             } else {
@@ -135,9 +141,11 @@ impl CpuCache {
     }
 
     /// Deallocate an object to the current `CpuCache`.
-    fn dealloc_object(&mut self, idx: usize, ptr: *mut u8) {
+    fn dealloc_object(&mut self) {
+        let idx = self.reg.idx.unwrap();
+        let ptr = self.reg.ptr.unwrap();
         if self.push(idx, ptr as *mut usize) {
-            self.set_stat(CpuCacheStat::Overranged(idx));
+            self.set_stat(CpuCacheStat::Overranged);
         } else if self.oversized() {
             self.set_stat(CpuCacheStat::Oversized);
         } else {
@@ -146,7 +154,8 @@ impl CpuCache {
     }
 
     /// Refill a batch of object from `TransferCache`.
-    fn refill_batch(&mut self, idx: usize, align: usize) {
+    fn refill_batch(&mut self) {
+        let idx = self.reg.idx.unwrap();
         if self.transfer_batch.is_none() {
             return;
         }
@@ -154,13 +163,7 @@ impl CpuCache {
         while let Some(ptr) = transfer_batch.pop() {
             self.push(idx, ptr);
         }
-        self.set_stat(CpuCacheStat::Alloc(idx, align));
-    }
-
-    fn taken(&mut self) {
-        if self.transfer_object.is_none() {
-            self.set_stat(CpuCacheStat::Ready);
-        }
+        self.set_stat(CpuCacheStat::Alloc);
     }
 
     /// Return the index of the `ElasticList` with the smallest `color`.
@@ -249,5 +252,25 @@ impl<const C: usize> CpuCaches<C> {
         assert_eq!(cpu < C, true);
 
         &mut self.cpu_caches[cpu]
+    }
+}
+
+struct CpuCacheReg {
+    idx: Option<usize>,
+    align: Option<usize>,
+    ptr: Option<*mut u8>,
+}
+
+impl CpuCacheReg {
+    const fn new() -> Self {
+        Self {
+            idx: None,
+            align: None,
+            ptr: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
     }
 }
