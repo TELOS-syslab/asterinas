@@ -280,7 +280,7 @@ impl TransferCache {
         let size = get_size(self.size_class_idx).unwrap();
         let start = span.start();
         let end = start + span.len() * K_PAGE_SIZE;
-        for addr in (start..=end - size).rev() {
+        for addr in (start..=end - size).rev().step_by(size) {
             free_list.push(addr as *mut usize);
         }
         free_list.init(start, end);

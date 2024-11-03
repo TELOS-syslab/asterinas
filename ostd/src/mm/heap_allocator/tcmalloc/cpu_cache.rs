@@ -159,10 +159,10 @@ impl CpuCache {
 
     /// Refill a batch of object from `TransferCache`.
     fn refill_batch(&mut self) {
-        let idx = self.reg.idx().unwrap();
         if self.transfer_batch.is_none() {
             return;
         }
+        let idx = self.reg.idx().unwrap();
         let mut transfer_batch = self.transfer_batch.take().unwrap();
         while let Some(ptr) = transfer_batch.pop() {
             self.push(idx, ptr);
