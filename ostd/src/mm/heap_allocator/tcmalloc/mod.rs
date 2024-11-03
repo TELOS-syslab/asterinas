@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::alloc::Layout;
-
 use central_free_list::CentralFreeLists;
 use common::{K_BASE_NUMBER_SPAN, K_PAGE_SHIFT, K_PAGE_SIZE};
 use cpu_cache::CpuCaches;
@@ -73,149 +71,153 @@ impl<const C: usize> Tcmalloc<C> {
         self.transfer_span[cpu].take()
     }
 
-    pub fn stat_handler(&mut self, cpu: usize, stat: Option<MetaStat>) -> FlowMod {
+    pub fn stat_handler(&mut self, cpu: usize, seed: Option<(MetaStat, MetaReg)>) -> FlowMod {
         match self.stat(cpu) {
             MetaStat::Alloc => {
                 self.allocate(cpu);
             }
-            MetaStat::Dealloc(ptr, layout) => {
-                self.deallocate(cpu, ptr, layout);
+            MetaStat::Dealloc => {
+                self.deallocate(cpu);
             }
-            MetaStat::Finish => {
-                self.taken(cpu);
+            MetaStat::Insufficient => {
+                self.refill_pages(cpu);
             }
-            MetaStat::Insufficient(_, layout) => {
-                self.refill_pages(cpu, layout);
-            }
-            MetaStat::LargeSize(_) => {
+            MetaStat::LargeSize => {
                 self.alloc_large_object(cpu);
             }
             MetaStat::Ready => {
-                self.seed(cpu, stat);
+                self.seed(cpu, seed);
             }
-            MetaStat::Uncovered(_, _) => {
+            MetaStat::Uncovered => {
                 self.scavenged(cpu);
             }
         }
         match self.stat(cpu) {
-            MetaStat::Finish => FlowMod::Forward,
-            MetaStat::Alloc(_) | MetaStat::Dealloc(_, _) => FlowMod::Circle,
-            MetaStat::Insufficient(_, _) | MetaStat::LargeSize(_) | MetaStat::Uncovered(_, _) => {
-                FlowMod::Backward
+            MetaStat::Ready => {
+                self.reg[cpu].reset();
+                FlowMod::Forward
             }
-            MetaStat::Ready => FlowMod::Exit,
+            MetaStat::Alloc | MetaStat::Dealloc => FlowMod::Circle,
+            MetaStat::Insufficient | MetaStat::LargeSize | MetaStat::Uncovered => FlowMod::Backward,
         }
     }
 
-    fn seed(&mut self, cpu: usize, stat: Option<MetaStat>) {
-        if let Some(stat) = stat {
+    fn seed(&mut self, cpu: usize, seed: Option<(MetaStat, MetaReg)>) {
+        if let Some((stat, reg)) = seed {
             self.set_stat(cpu, stat);
+            self.set_reg(cpu, reg);
         }
     }
 
     /// Try to allocate a sized object meeting the need of given `layout`.
     fn allocate(&mut self, cpu: usize) {
-        let layout = self.reg[cpu].layout.unwrap();
+        let layout = self.reg[cpu].layout().unwrap();
         match match_size_class(layout) {
             None => {
                 let size = layout.size();
                 let pages = (size + K_PAGE_SIZE - 1) >> K_PAGE_SHIFT;
                 if pages > K_BASE_NUMBER_SPAN {
-                    self.reg[cpu].pages = Some(pages);
+                    self.reg[cpu].set_pages(pages);
                     self.set_stat(cpu, MetaStat::LargeSize);
                 } else {
                     let mut _central_free_list_seed = Some(CentralFreeListStat::Alloc);
-                    let mut _page_heap_seed: Option<PageHeapStat> = None;
+                    let mut _page_heap_seed = None;
                     loop {
                         let central_free_list = self
                             .central_free_lists
                             .get_current_central_free_list(pages - 1);
                         match central_free_list.stat_handler(_central_free_list_seed.clone()) {
                             FlowMod::Backward => {
-                                _page_heap_seed = Some(PageHeapStat::Alloc);
-                                self.page_heap.set_pages(pages);
+                                _page_heap_seed = Some((
+                                    PageHeapStat::Alloc,
+                                    PageHeapReg::from(None, Some(pages)),
+                                ));
                             }
                             FlowMod::Circle => continue,
                             FlowMod::Forward => {
                                 let object =
-                                    Some(central_free_list.take_span().unwrap().start() as *mut u8);
-                                self.put_object(cpu, object);
+                                    central_free_list.take_span().unwrap().start() as *mut u8;
+                                self.put_object(cpu, Some(object));
                                 break;
                             }
                         }
 
-                        if _page_heap_seed.is_none() {
-                            continue;
-                        }
-                        let central_free_list = self
-                            .central_free_lists
-                            .get_current_central_free_list(pages - 1);
-                        let page_heap = &mut self.page_heap;
-                        match page_heap.stat_handler(_page_heap_seed.clone()) {
-                            FlowMod::Backward => break,
-                            FlowMod::Circle => continue,
-                            FlowMod::Forward => {
-                                central_free_list.put_span(page_heap.take_span());
-                                continue;
+                        if _page_heap_seed.is_some() {
+                            let page_heap = &mut self.page_heap;
+                            match page_heap.stat_handler(_page_heap_seed.clone()) {
+                                FlowMod::Backward => {
+                                    self.reg[cpu].set_pages(page_heap.reg().pages().unwrap());
+                                    break;
+                                }
+                                FlowMod::Circle => continue,
+                                FlowMod::Forward => {
+                                    self.central_free_lists
+                                        .get_current_central_free_list(pages - 1)
+                                        .put_span(page_heap.take_span());
+                                    _page_heap_seed = None;
+                                    continue;
+                                }
                             }
                         }
                     }
                     if self.transfer_object[cpu].is_some() {
-                        self.set_stat(cpu, MetaStat::Finish);
+                        self.set_stat(cpu, MetaStat::Ready);
                     } else {
-                        self.set_stat(cpu, MetaStat::Insufficient(pages, layout));
+                        self.set_stat(cpu, MetaStat::Insufficient);
                     }
                 }
             }
             Some(idx) => {
-                let mut _cpu_cache_seed = Some(CpuCacheStat::Alloc(idx, layout.align()));
-                let mut _transfer_cache_seed: Option<TransferCacheStat> = None;
-                let mut _central_free_list_seed: Option<CentralFreeListStat> = None;
-                let mut _central_free_list_meta_seed: Option<CentralFreeListMetaStat> = None;
-                let mut _page_heap_seed: Option<PageHeapStat> = None;
+                let mut _cpu_cache_seed = Some((
+                    CpuCacheStat::Alloc,
+                    CpuCacheReg::from(Some(idx), Some(layout.align()), None),
+                ));
+                let mut _transfer_cache_seed = None;
+                let mut _central_free_list_seed = None;
+                let mut _central_free_list_meta_seed = None;
+                let mut _page_heap_seed = None;
                 loop {
                     let cpu_cache = self.cpu_caches.get_current_cpu_cache(cpu);
                     early_println!("[tcmalloc] cpu_cache_stat = {:#?}", cpu_cache.stat());
                     match cpu_cache.stat_handler(_cpu_cache_seed.clone()) {
                         FlowMod::Backward => _transfer_cache_seed = Some(TransferCacheStat::Alloc),
-                        FlowMod::Circle => {}
-                        FlowMod::Exit => break,
+                        FlowMod::Circle => continue,
                         FlowMod::Forward => {
-                            let object = Some(cpu_cache.take_object().unwrap());
-                            self.put_object(cpu, object);
+                            let object = cpu_cache.take_object().unwrap();
+                            self.put_object(cpu, Some(object));
+                            break;
                         }
                     }
 
-                    if let Some(seed) = _transfer_cache_seed.clone() {
-                        match seed {
-                            TransferCacheStat::Ready => continue,
-                            _ => {}
-                        }
-                    }
-                    let cpu_cache = self.cpu_caches.get_current_cpu_cache(cpu);
-                    let transfer_cache = self.transfer_caches.get_current_transfer_cache(idx);
-                    early_println!(
-                        "[tcmalloc] transfer_cache_stat = {:#?}",
-                        transfer_cache.stat()
-                    );
-                    match transfer_cache.stat_handler(_transfer_cache_seed.clone()) {
-                        FlowMod::Backward => match transfer_cache.stat() {
-                            TransferCacheStat::Empty => {
-                                _central_free_list_seed = Some(CentralFreeListStat::Alloc)
+                    if _transfer_cache_seed.is_some() {
+                        let transfer_cache = self.transfer_caches.get_current_transfer_cache(idx);
+                        early_println!(
+                            "[tcmalloc] transfer_cache_stat = {:#?}",
+                            transfer_cache.stat()
+                        );
+                        match transfer_cache.stat_handler(_transfer_cache_seed.clone()) {
+                            FlowMod::Backward => match transfer_cache.stat() {
+                                TransferCacheStat::Empty => {
+                                    _central_free_list_seed = Some(CentralFreeListStat::Alloc)
+                                }
+                                TransferCacheStat::Lack => {
+                                    _central_free_list_meta_seed =
+                                        Some(CentralFreeListMetaStat::Alloc)
+                                }
+                                _ => panic!(),
+                            },
+                            FlowMod::Circle => continue,
+                            FlowMod::Forward => {
+                                self.cpu_caches
+                                    .get_current_cpu_cache(cpu)
+                                    .put_batch(transfer_cache.take_batch());
+                                _transfer_cache_seed = None;
+                                continue;
                             }
-                            TransferCacheStat::Lack => {
-                                _central_free_list_meta_seed = Some(CentralFreeListMetaStat::Alloc)
-                            }
-                            _ => panic!(),
-                        },
-                        FlowMod::Circle => {}
-                        FlowMod::Exit => _transfer_cache_seed = Some(TransferCacheStat::Ready),
-                        FlowMod::Forward => {
-                            cpu_cache.put_batch(transfer_cache.take_batch());
                         }
                     }
 
-                    if let Some(_) = _central_free_list_meta_seed.clone() {
+                    if _central_free_list_meta_seed.is_some() {
                         let central_free_lists = &mut self.central_free_lists;
                         early_println!(
                             "[tcmalloc] central_free_list_meta_stat = {:#?}",
@@ -223,22 +225,23 @@ impl<const C: usize> Tcmalloc<C> {
                         );
                         match central_free_lists.stat_handler(_central_free_list_meta_seed.clone())
                         {
-                            FlowMod::Backward => match central_free_lists.stat() {
-                                CentralFreeListMetaStat::Empty => {
-                                    _page_heap_seed = Some(PageHeapStat::Alloc(1))
-                                }
-                                _ => _central_free_list_meta_seed = None,
-                            },
-                            FlowMod::Circle => {}
-                            FlowMod::Exit => panic!(),
+                            FlowMod::Backward => {
+                                _page_heap_seed =
+                                    Some((PageHeapStat::Alloc, PageHeapReg::from(None, Some(1))));
+                            }
+                            FlowMod::Circle => continue,
                             FlowMod::Forward => {
-                                transfer_cache.put_list(central_free_lists.take_list());
+                                self.transfer_caches
+                                    .get_current_transfer_cache(idx)
+                                    .put_list(central_free_lists.take_list());
+                                _central_free_list_meta_seed = None;
+                                continue;
                             }
                         }
                     }
 
                     let pages = get_pages(idx).unwrap();
-                    if let Some(_) = _central_free_list_seed.clone() {
+                    if _central_free_list_seed.is_some() {
                         let central_free_list = self
                             .central_free_lists
                             .get_current_central_free_list(pages - 1);
@@ -247,48 +250,50 @@ impl<const C: usize> Tcmalloc<C> {
                             central_free_list.stat()
                         );
                         match central_free_list.stat_handler(_central_free_list_seed.clone()) {
-                            FlowMod::Backward => _page_heap_seed = Some(PageHeapStat::Alloc(pages)),
-                            FlowMod::Circle => {}
-                            FlowMod::Exit => _central_free_list_seed = None,
+                            FlowMod::Backward => {
+                                _page_heap_seed = Some((
+                                    PageHeapStat::Alloc,
+                                    PageHeapReg::from(None, Some(pages)),
+                                ))
+                            }
+                            FlowMod::Circle => continue,
                             FlowMod::Forward => {
-                                transfer_cache.put_span(central_free_list.take_span());
+                                self.transfer_caches
+                                    .get_current_transfer_cache(idx)
+                                    .put_span(central_free_list.take_span());
+                                _central_free_list_seed = None;
+                                continue;
                             }
                         }
                     }
 
-                    if let Some(seed) = _page_heap_seed.clone() {
-                        match seed {
-                            PageHeapStat::Ready => continue,
-                            _ => {}
-                        }
-                    }
-                    let page_heap = &mut self.page_heap;
-                    early_println!("[tcmalloc] page_heap_stat = {:#?}", page_heap.stat());
-                    match page_heap.stat_handler(_page_heap_seed.clone()) {
-                        FlowMod::Backward => break,
-                        FlowMod::Circle => {}
-                        FlowMod::Exit => _page_heap_seed = Some(PageHeapStat::Ready),
-                        FlowMod::Forward => {
-                            if let Some(_) = _central_free_list_meta_seed.clone() {
-                                let central_free_lists = &mut self.central_free_lists;
-                                central_free_lists.put_span(page_heap.take_span());
-                            } else if let Some(_) = _central_free_list_seed.clone() {
-                                let central_free_list = self
-                                    .central_free_lists
-                                    .get_current_central_free_list(pages - 1);
-                                central_free_list.put_span(page_heap.take_span());
+                    if _page_heap_seed.is_some() {
+                        let page_heap = &mut self.page_heap;
+                        early_println!("[tcmalloc] page_heap_stat = {:#?}", page_heap.stat());
+                        match page_heap.stat_handler(_page_heap_seed.clone()) {
+                            FlowMod::Backward => {
+                                self.reg[cpu].set_pages(page_heap.reg().pages().unwrap());
+                                break;
+                            }
+                            FlowMod::Circle => continue,
+                            FlowMod::Forward => {
+                                if _central_free_list_meta_seed.is_some() {
+                                    self.central_free_lists.put_span(page_heap.take_span());
+                                } else if _central_free_list_seed.is_some() {
+                                    self.central_free_lists
+                                        .get_current_central_free_list(pages - 1)
+                                        .put_span(page_heap.take_span());
+                                }
+                                _page_heap_seed = None;
+                                continue;
                             }
                         }
                     }
                 }
                 if self.transfer_object[cpu].is_some() {
-                    self.set_stat(cpu, MetaStat::Finish);
+                    self.set_stat(cpu, MetaStat::Ready);
                 } else {
-                    let pages = match self.page_heap.stat() {
-                        PageHeapStat::Insufficient(pages) => pages,
-                        _ => panic!(),
-                    };
-                    self.set_stat(cpu, MetaStat::Insufficient(pages, layout));
+                    self.set_stat(cpu, MetaStat::Insufficient);
                 }
             }
         }
@@ -300,11 +305,13 @@ impl<const C: usize> Tcmalloc<C> {
         }
         let ptr = self.transfer_span[cpu].take().unwrap().start() as *mut u8;
         self.transfer_object[cpu] = Some(ptr);
-        self.set_stat(cpu, MetaStat::Finish);
+        self.set_stat(cpu, MetaStat::Ready);
     }
 
     /// Try to allocate a sized object meeting the need of given `layout`.
-    fn deallocate(&mut self, cpu: usize, ptr: *mut u8, layout: Layout) {}
+    fn deallocate(&mut self, cpu: usize) {
+        todo!();
+    }
 
     fn scavenged(&mut self, cpu: usize) {
         if self.transfer_span[cpu].is_none() {
@@ -312,19 +319,13 @@ impl<const C: usize> Tcmalloc<C> {
         }
     }
 
-    fn refill_pages(&mut self, cpu: usize, layout: Layout) {
+    fn refill_pages(&mut self, cpu: usize) {
         if self.transfer_span[cpu].is_none() {
             return;
         }
         let page_heap = &mut self.page_heap;
         page_heap.put_span(self.transfer_span[cpu].take());
-        self.set_stat(cpu, MetaStat::Alloc(layout));
-    }
-
-    fn taken(&mut self, cpu: usize) {
-        if self.transfer_object[cpu].is_none() {
-            self.set_stat(cpu, MetaStat::Ready);
-        }
+        self.set_stat(cpu, MetaStat::Alloc);
     }
 
     pub fn stat(&self, cpu: usize) -> MetaStat {
@@ -334,24 +335,8 @@ impl<const C: usize> Tcmalloc<C> {
     pub fn set_stat(&mut self, cpu: usize, stat: MetaStat) {
         self.stat[cpu] = stat;
     }
-}
 
-struct MetaReg {
-    layout: Option<Layout>,
-    ptr: Option<*mut u8>,
-    pages: Option<usize>,
-}
-
-impl MetaReg {
-    const fn new() -> Self {
-        Self {
-            layout: None,
-            ptr: None,
-            pages: None,
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::new();
+    fn set_reg(&mut self, cpu: usize, reg: MetaReg) {
+        self.reg[cpu] = reg;
     }
 }

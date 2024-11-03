@@ -3,7 +3,7 @@
 use super::{
     common::{K_PAGE_SHIFT, K_PAGE_SIZE, K_PRIMARY_HEAP_LEN},
     size_class::Span,
-    status::{FlowMod, PageHeapStat},
+    status::{FlowMod, PageHeapReg, PageHeapStat},
 };
 
 pub struct PageHeap {
@@ -34,10 +34,6 @@ impl PageHeap {
         }
     }
 
-    pub fn set_pages(&mut self, pages: usize) {
-        self.reg.pages = Some(pages);
-    }
-
     pub fn put_span(&mut self, transfer_span: Option<Span>) {
         self.transfer_span = Some(transfer_span.unwrap());
     }
@@ -46,7 +42,7 @@ impl PageHeap {
         self.transfer_span.take()
     }
 
-    pub fn stat_handler(&mut self, stat: Option<PageHeapStat>) -> FlowMod {
+    pub fn stat_handler(&mut self, seed: Option<(PageHeapStat, PageHeapReg)>) -> FlowMod {
         match self.stat() {
             PageHeapStat::Alloc => {
                 self.alloc_pages();
@@ -58,22 +54,26 @@ impl PageHeap {
                 self.refill_pages();
             }
             PageHeapStat::Ready => {
-                self.seed(stat);
+                self.seed(seed);
             }
             PageHeapStat::Uncovered => {
                 self.scavenged();
             }
         }
         match self.stat() {
-            PageHeapStat::Ready => FlowMod::Forward,
+            PageHeapStat::Ready => {
+                self.reg.reset();
+                FlowMod::Forward
+            }
             PageHeapStat::Alloc | PageHeapStat::Dealloc => FlowMod::Circle,
             PageHeapStat::Insufficient | PageHeapStat::Uncovered => FlowMod::Backward,
         }
     }
 
-    fn seed(&mut self, stat: Option<PageHeapStat>) {
-        if let Some(stat) = stat {
+    fn seed(&mut self, seed: Option<(PageHeapStat, PageHeapReg)>) {
+        if let Some((stat, reg)) = seed {
             self.set_stat(stat);
+            self.set_reg(reg);
         }
     }
 
@@ -113,7 +113,7 @@ impl PageHeap {
 
     /// Try to allocate span with given `pages` from `PrimaryHeap`.
     fn alloc_pages(&mut self) {
-        let pages = self.reg.pages.unwrap();
+        let pages = self.reg.pages().unwrap();
         if let Some(start) = self.try_to_match_span(pages) {
             self.transfer_span = Some(Span::new(pages, start));
             self.set_stat(PageHeapStat::Ready);
@@ -124,8 +124,8 @@ impl PageHeap {
 
     /// Try to deallocate span with given `pages` to `PrimaryHeap`.
     fn dealloc_pages(&mut self) {
-        let addr = self.reg.ptr.unwrap() as usize;
-        let pages = self.reg.pages.unwrap();
+        let addr = self.reg.ptr().unwrap() as usize;
+        let pages = self.reg.pages().unwrap();
         let primary_heap = &mut self.primary_heap;
         let base = primary_heap.first().unwrap().1;
         let bound = primary_heap.last().unwrap().1 + K_PAGE_SIZE;
@@ -165,22 +165,12 @@ impl PageHeap {
     pub fn set_stat(&mut self, stat: PageHeapStat) {
         self.stat = stat;
     }
-}
 
-struct PageHeapReg {
-    ptr: Option<*mut usize>,
-    pages: Option<usize>,
-}
-
-impl PageHeapReg {
-    const fn new() -> Self {
-        Self {
-            ptr: None,
-            pages: None,
-        }
+    pub fn reg(&self) -> PageHeapReg {
+        self.reg.clone()
     }
 
-    fn reset(&mut self) {
-        *self = Self::new();
+    fn set_reg(&mut self, reg: PageHeapReg) {
+        self.reg = reg;
     }
 }

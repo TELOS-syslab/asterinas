@@ -6,20 +6,12 @@ use core::{
 };
 
 use tcmalloc::{
-    common::{K_PAGE_SHIFT, K_PAGE_SIZE, K_PRIMARY_HEAP_LEN},
-    status::{FlowMod, MetaStat},
+    common::{K_PAGE_SIZE, K_PRIMARY_HEAP_LEN},
+    status::{FlowMod, MetaReg, MetaStat},
     Tcmalloc,
 };
 
-use super::{page::meta::mapping, Vaddr};
-use crate::{
-    early_println,
-    mm::{
-        kspace::LINEAR_MAPPING_BASE_VADDR,
-        paddr_to_vaddr,
-        page::{allocator::PAGE_ALLOCATOR, Page},
-    },
-};
+use crate::early_println;
 
 mod tcmalloc;
 
@@ -55,24 +47,20 @@ fn get_current_cpu() -> usize {
 unsafe impl<const C: usize> GlobalAlloc for Tcmalloc<C> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         early_println!("[tcmalloc] alloc, layout = {:#?}.", layout);
-        let mut _meta_seed = Some(MetaStat::Alloc(layout));
+        let mut _meta_seed = Some((MetaStat::Alloc, MetaReg::from(Some(layout), None, None)));
         let cpu = get_current_cpu();
-        let mut rslt = core::ptr::null_mut();
         loop {
             early_println!("[tcmalloc] meta_stat = {:#?}", HEAP_ALLOCATOR.stat(cpu));
             match HEAP_ALLOCATOR.stat_handler(cpu, _meta_seed.clone()) {
                 FlowMod::Backward => {
-                    panic!();
+                    todo!();
                 }
                 FlowMod::Circle => continue,
-                FlowMod::Exit => break,
                 FlowMod::Forward => {
-                    rslt = HEAP_ALLOCATOR.take_object(cpu).unwrap();
+                    return HEAP_ALLOCATOR.take_object(cpu).unwrap();
                 }
             }
         }
-        early_println!("[tcmalloc] rslt = {:x}", rslt as usize);
-        rslt
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {}
