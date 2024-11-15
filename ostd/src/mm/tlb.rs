@@ -7,7 +7,7 @@ use core::ops::Range;
 
 use super::{page::DynPage, Vaddr, PAGE_SIZE};
 use crate::{
-    cpu::{CpuSet, PinCurrentCpu},
+    cpu::{AtomicCpuSet, CpuId, CpuSet, PinCurrentCpu},
     cpu_local,
     sync::SpinLock,
     task::disable_preempt,
@@ -16,21 +16,28 @@ use crate::{
 /// A TLB flusher that is aware of which CPUs are needed to be flushed.
 ///
 /// The flusher needs to stick to the current CPU.
-pub struct TlbFlusher<G: PinCurrentCpu> {
+pub struct TlbFlusher<'a, G: PinCurrentCpu> {
+    cpus: Option<&'a AtomicCpuSet>,
     target_cpus: CpuSet,
     // Better to store them here since loading and counting them from the CPUs
     // list brings non-trivial overhead.
     need_remote_flush: bool,
     need_self_flush: bool,
+    current_cpu: CpuId,
     _pin_current: G,
 }
 
-impl<G: PinCurrentCpu> TlbFlusher<G> {
+impl<'a, G: PinCurrentCpu> TlbFlusher<'a, G> {
     /// Creates a new TLB flusher with the specified CPUs to be flushed.
     ///
     /// The flusher needs to stick to the current CPU. So please provide a
     /// guard that implements [`PinCurrentCpu`].
-    pub fn new(target_cpus: CpuSet, pin_current_guard: G) -> Self {
+    pub fn new(cpus: Option<&'a AtomicCpuSet>, pin_current_guard: G) -> Self {
+        let target_cpus = if let Some(cpus) = cpus {
+            cpus.load()
+        } else {
+            CpuSet::new_full()
+        };
         let current_cpu = pin_current_guard.current_cpu();
 
         let mut need_self_flush = false;
@@ -44,11 +51,38 @@ impl<G: PinCurrentCpu> TlbFlusher<G> {
             }
         }
         Self {
+            cpus,
             target_cpus,
             need_remote_flush,
             need_self_flush,
+            current_cpu,
             _pin_current: pin_current_guard,
         }
+    }
+
+    /// Updates the CPU list from the registered CPUs.
+    pub fn update_cpu(&mut self) {
+        if self.cpus.is_none() {
+            return;
+        };
+
+        let target_cpus = self.cpus.unwrap().load();
+        let current_cpu = self.current_cpu;
+
+        let mut need_self_flush = false;
+        let mut need_remote_flush = false;
+
+        for cpu in target_cpus.iter() {
+            if cpu == current_cpu {
+                need_self_flush = true;
+            } else {
+                need_remote_flush = true;
+            }
+        }
+
+        self.target_cpus = target_cpus;
+        self.need_self_flush = need_self_flush;
+        self.need_remote_flush = need_remote_flush;
     }
 
     /// Issues a pending TLB flush request.

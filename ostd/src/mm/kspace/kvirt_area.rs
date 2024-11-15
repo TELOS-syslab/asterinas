@@ -9,7 +9,6 @@ use align_ext::AlignExt;
 
 use super::{KERNEL_PAGE_TABLE, TRACKED_MAPPED_PAGES_RANGE, VMALLOC_VADDR_RANGE};
 use crate::{
-    cpu::CpuSet,
     mm::{
         page::{meta::PageMeta, DynPage, Page},
         page_prop::PageProperty,
@@ -213,7 +212,7 @@ impl KVirtArea<Tracked> {
         assert!(self.start() <= range.start && self.end() >= range.end);
         let page_table = KERNEL_PAGE_TABLE.get().unwrap();
         let mut cursor = page_table.cursor_mut(&range).unwrap();
-        let flusher = TlbFlusher::new(CpuSet::new_full(), disable_preempt());
+        let flusher = TlbFlusher::new(None, disable_preempt());
         let mut va = self.start();
         for page in pages.into_iter() {
             // SAFETY: The constructor of the `KVirtArea<Tracked>` structure has already ensured this
@@ -275,7 +274,7 @@ impl KVirtArea<Untracked> {
 
         let page_table = KERNEL_PAGE_TABLE.get().unwrap();
         let mut cursor = page_table.cursor_mut(&va_range).unwrap();
-        let flusher = TlbFlusher::new(CpuSet::new_full(), disable_preempt());
+        let flusher = TlbFlusher::new(None, disable_preempt());
         // SAFETY: The caller of `map_untracked_pages` has ensured the safety of this mapping.
         unsafe {
             cursor.map_pa(&pa_range, prop);
@@ -314,7 +313,7 @@ impl<M: AllocatorSelector + 'static> Drop for KVirtArea<M> {
         let page_table = KERNEL_PAGE_TABLE.get().unwrap();
         let range = self.start()..self.end();
         let mut cursor = page_table.cursor_mut(&range).unwrap();
-        let flusher = TlbFlusher::new(CpuSet::new_full(), disable_preempt());
+        let flusher = TlbFlusher::new(None, disable_preempt());
         let tlb_prefer_flush_all = self.end() - self.start() > FLUSH_ALL_RANGE_THRESHOLD;
 
         loop {
