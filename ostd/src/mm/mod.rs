@@ -39,6 +39,7 @@ pub use self::{
 };
 pub(crate) use self::{
     kspace::paddr_to_vaddr, page_prop::PrivilegedPageFlags, page_table::PageTable,
+    tlb::this_cpu_init_garbage_collection as this_cpu_init_tlb_recycler,
 };
 use crate::arch::mm::PagingConsts;
 

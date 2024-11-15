@@ -10,9 +10,10 @@ use alloc::collections::VecDeque;
 use spin::Once;
 
 use crate::{
-    cpu::{CpuSet, PinCurrentCpu},
+    cpu::{CpuId, CpuSet, PinCurrentCpu},
     cpu_local,
     sync::SpinLock,
+    task::disable_preempt,
     trap::{self, IrqLine, TrapFrame},
 };
 
@@ -23,6 +24,8 @@ use crate::{
 /// The function should be short and non-blocking, as it will be executed in
 /// interrupt context with interrupts disabled.
 ///
+/// The executed function will be provided by the caller CPU ID.
+///
 /// This function does not block until all the target processors acknowledges
 /// the interrupt. So if any of the target processors disables IRQs for too
 /// long that the controller cannot queue them, the function will not be
@@ -30,7 +33,7 @@ use crate::{
 ///
 /// The function `f` will be executed asynchronously on the target processors.
 /// However if called on the current processor, it will be synchronous.
-pub fn inter_processor_call(targets: &CpuSet, f: fn()) {
+pub fn inter_processor_call(targets: &CpuSet, f: fn(CpuId)) {
     let irq_guard = trap::disable_local();
     let this_cpu_id = irq_guard.current_cpu();
     let irq_num = INTER_PROCESSOR_CALL_IRQ.get().unwrap().num();
@@ -41,7 +44,10 @@ pub fn inter_processor_call(targets: &CpuSet, f: fn()) {
             call_on_self = true;
             continue;
         }
-        CALL_QUEUES.get_on_cpu(cpu_id).lock().push_back(f);
+        CALL_QUEUES
+            .get_on_cpu(cpu_id)
+            .lock()
+            .push_back((f, this_cpu_id));
     }
     for cpu_id in targets.iter() {
         if cpu_id == this_cpu_id {
@@ -54,29 +60,28 @@ pub fn inter_processor_call(targets: &CpuSet, f: fn()) {
     }
     if call_on_self {
         // Execute the function synchronously.
-        f();
+        f(this_cpu_id);
     }
 }
 
 static INTER_PROCESSOR_CALL_IRQ: Once<IrqLine> = Once::new();
 
 cpu_local! {
-    static CALL_QUEUES: SpinLock<VecDeque<fn()>> = SpinLock::new(VecDeque::new());
+    static CALL_QUEUES: SpinLock<VecDeque<(fn(CpuId), CpuId)>> = SpinLock::new(VecDeque::new());
 }
 
 fn do_inter_processor_call(_trapframe: &TrapFrame) {
-    // TODO: in interrupt context, disabling interrupts is not necessary.
-    let preempt_guard = trap::disable_local();
+    let preempt_guard = disable_preempt();
     let cur_cpu = preempt_guard.current_cpu();
 
     let mut queue = CALL_QUEUES.get_on_cpu(cur_cpu).lock();
-    while let Some(f) = queue.pop_front() {
+    while let Some((f, id)) = queue.pop_front() {
         log::trace!(
             "Performing inter-processor call to {:#?} on CPU {:#?}",
             f,
             cur_cpu
         );
-        f();
+        f(id);
     }
 }
 

@@ -15,6 +15,7 @@ use super::{
     guard::{GuardTransfer, Guardian},
     PreemptDisabled,
 };
+use crate::{mm::tlb::PROCESS_PENDING_INTERVAL, trap};
 
 /// Spin-based Read-write Lock
 ///
@@ -130,10 +131,17 @@ impl<T: ?Sized, G: Guardian> RwLock<T, G> {
     /// in which other readers or writers waiting simultaneously will
     /// obtain the lock.
     pub fn read(&self) -> RwLockReadGuard<T, G> {
+        let mut process_pending_interval = 0;
         loop {
             if let Some(readguard) = self.try_read() {
                 return readguard;
             } else {
+                process_pending_interval += 1;
+                if process_pending_interval == PROCESS_PENDING_INTERVAL {
+                    let irq_guard = trap::disable_local();
+                    crate::mm::tlb::process_pending_sync_shootdowns(&irq_guard);
+                    process_pending_interval = 0;
+                }
                 core::hint::spin_loop();
             }
         }
@@ -146,10 +154,17 @@ impl<T: ?Sized, G: Guardian> RwLock<T, G> {
     /// in which other readers or writers waiting simultaneously will
     /// obtain the lock.
     pub fn write(&self) -> RwLockWriteGuard<T, G> {
+        let mut process_pending_interval = 0;
         loop {
             if let Some(writeguard) = self.try_write() {
                 return writeguard;
             } else {
+                process_pending_interval += 1;
+                if process_pending_interval == PROCESS_PENDING_INTERVAL {
+                    let irq_guard = trap::disable_local();
+                    crate::mm::tlb::process_pending_sync_shootdowns(&irq_guard);
+                    process_pending_interval = 0;
+                }
                 core::hint::spin_loop();
             }
         }
