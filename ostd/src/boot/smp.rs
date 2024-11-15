@@ -134,6 +134,8 @@ fn ap_early_entry(local_apic_id: u32) -> ! {
         crate::arch::init_on_ap();
     }
 
+    crate::mm::tlb::this_cpu_init_garbage_collection();
+
     crate::arch::irq::enable_local();
 
     // SAFETY: this function is only called once on this AP.

@@ -195,7 +195,7 @@ fn set_need_preempt(cpu_id: CpuId) {
     if preempt_guard.current_cpu() == cpu_id {
         cpu_local::set_need_preempt();
     } else {
-        crate::smp::inter_processor_call(&CpuSet::from(cpu_id), || {
+        crate::smp::inter_processor_call(&CpuSet::from(cpu_id), |_| {
             cpu_local::set_need_preempt();
         });
     }
@@ -240,7 +240,17 @@ fn reschedule<F>(mut f: F)
 where
     F: FnMut(&mut dyn LocalRunQueue) -> ReschedAction,
 {
+    if cpu_local::get_guard_count() > 0 || !crate::arch::irq::is_local_enabled() {
+        let irq_guard = crate::trap::disable_local();
+        crate::mm::tlb::process_pending_sync_shootdowns(&irq_guard);
+        return;
+    }
+
     let next_task = loop {
+        {
+            let irq_guard = crate::trap::disable_local();
+            crate::mm::tlb::process_pending_sync_shootdowns(&irq_guard);
+        }
         let mut action = ReschedAction::DoNothing;
         SCHEDULER.get().unwrap().local_mut_rq_with(&mut |rq| {
             action = f(rq);

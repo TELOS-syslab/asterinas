@@ -40,6 +40,8 @@ use core::{
 use crate::{
     cpu::{current_cpu_unchecked, CpuId},
     cpu_local, cpu_local_cell,
+    mm::tlb::PROCESS_PENDING_INTERVAL,
+    trap,
 };
 
 /// A lock body for a queue spinlock.
@@ -289,7 +291,14 @@ impl LockBody {
         // We're pending, wait for the owner to go away.
         // 0,1,1 -> *,1,0
         if lock_val & Self::LOCKED_MASK != 0 {
+            let mut process_pending_interval = 0;
             while unsafe { intrinsics::atomic_load_acquire(self.locked_ptr()) } != 0 {
+                process_pending_interval += 1;
+                if process_pending_interval == PROCESS_PENDING_INTERVAL {
+                    let irq_guard = trap::disable_local();
+                    crate::mm::tlb::process_pending_sync_shootdowns(&irq_guard);
+                    process_pending_interval = 0;
+                }
                 core::hint::spin_loop();
             }
         }
@@ -393,7 +402,14 @@ impl LockBody {
                 .store((node as *const QueueNode).cast_mut(), Ordering::Relaxed);
 
             // Spin on the locked bit.
+            let mut process_pending_interval = 0;
             while !node.locked.load(Ordering::Relaxed) {
+                process_pending_interval += 1;
+                if process_pending_interval == PROCESS_PENDING_INTERVAL {
+                    let irq_guard = trap::disable_local();
+                    crate::mm::tlb::process_pending_sync_shootdowns(&irq_guard);
+                    process_pending_interval = 0;
+                }
                 core::hint::spin_loop();
             }
 
@@ -414,10 +430,17 @@ impl LockBody {
 
         let mut val;
 
+        let mut process_pending_interval = 0;
         loop {
             val = unsafe { intrinsics::atomic_load_acquire(self.val_ptr()) };
             if val & (Self::LOCKED_MASK | Self::PENDING_MASK) == 0 {
                 break;
+            }
+            process_pending_interval += 1;
+            if process_pending_interval == PROCESS_PENDING_INTERVAL {
+                let irq_guard = trap::disable_local();
+                crate::mm::tlb::process_pending_sync_shootdowns(&irq_guard);
+                process_pending_interval = 0;
             }
             core::hint::spin_loop();
         }

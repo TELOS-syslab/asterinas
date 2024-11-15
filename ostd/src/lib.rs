@@ -122,6 +122,8 @@ unsafe fn init() {
 
     bus::init();
 
+    mm::tlb::this_cpu_init_garbage_collection();
+
     arch::irq::enable_local();
 
     invoke_ffi_init_funcs();
