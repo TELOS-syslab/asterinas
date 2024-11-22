@@ -10,7 +10,6 @@ use ostd::{
     cpu::{all_cpus, CpuId, PinCurrentCpu},
     sync::SpinLock,
     task::{
-        disable_preempt,
         scheduler::{
             info::CommonSchedInfo, inject_scheduler, EnqueueFlags, LocalRunQueue, Scheduler,
             UpdateFlags,
