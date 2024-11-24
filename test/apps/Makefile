@@ -38,6 +38,7 @@ TEST_APPS := \
 	pty \
 	sched \
 	shm \
+	scale \
 	signal_c \
 	vsock \
 
