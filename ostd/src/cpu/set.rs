@@ -4,8 +4,6 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use smallvec::SmallVec;
-
 use super::{num_cpus, CpuId};
 use crate::const_assert;
 
@@ -13,7 +11,7 @@ use crate::const_assert;
 #[derive(Clone, Debug, Default)]
 pub struct CpuSet {
     // A bitset representing the CPUs in the system.
-    bits: SmallVec<[InnerPart; NR_PARTS_NO_ALLOC]>,
+    bits: [InnerPart; NR_PARTS_NO_ALLOC],
 }
 
 type InnerPart = u64;
@@ -50,9 +48,7 @@ impl CpuSet {
     pub fn add(&mut self, cpu_id: CpuId) {
         let part_idx = part_idx(cpu_id);
         let bit_idx = bit_idx(cpu_id);
-        if part_idx >= self.bits.len() {
-            self.bits.resize(part_idx + 1, 0);
-        }
+        assert!(part_idx < self.bits.len());
         self.bits[part_idx] |= 1 << bit_idx;
     }
 
@@ -127,8 +123,9 @@ impl CpuSet {
     /// Only for internal use. The set cannot contain non-existent CPUs.
     fn with_capacity_val(num_cpus: usize, val: InnerPart) -> Self {
         let num_parts = parts_for_cpus(num_cpus);
-        let mut bits = SmallVec::with_capacity(num_parts);
-        bits.resize(num_parts, val);
+        assert!(num_parts <= NR_PARTS_NO_ALLOC);
+        let mut bits = [0; NR_PARTS_NO_ALLOC];
+        bits.iter_mut().take(num_parts).for_each(|part| *part = val);
         Self { bits }
     }
 
@@ -155,7 +152,7 @@ impl From<CpuId> for CpuSet {
 /// operation contains multiple CPUs, the ordering is not guaranteed.
 #[derive(Debug)]
 pub struct AtomicCpuSet {
-    bits: SmallVec<[AtomicInnerPart; NR_PARTS_NO_ALLOC]>,
+    bits: [AtomicInnerPart; NR_PARTS_NO_ALLOC],
 }
 
 type AtomicInnerPart = AtomicU64;
@@ -164,7 +161,7 @@ const_assert!(core::mem::size_of::<AtomicInnerPart>() * 8 == BITS_PER_PART);
 impl AtomicCpuSet {
     /// Creates a new `AtomicCpuSet` with an initial value.
     pub fn new(value: CpuSet) -> Self {
-        let bits = value.bits.into_iter().map(AtomicU64::new).collect();
+        let bits = core::array::from_fn(|i| AtomicU64::new(value.bits[i]));
         Self { bits }
     }
 
@@ -173,11 +170,7 @@ impl AtomicCpuSet {
     /// This operation can only be done in the [`Ordering::Relaxed`] memory
     /// order. It cannot be used to synchronize anything between CPUs.
     pub fn load(&self) -> CpuSet {
-        let bits = self
-            .bits
-            .iter()
-            .map(|part| part.load(Ordering::Relaxed))
-            .collect();
+        let bits = core::array::from_fn(|i| self.bits[i].load(Ordering::Relaxed));
         CpuSet { bits }
     }
 
