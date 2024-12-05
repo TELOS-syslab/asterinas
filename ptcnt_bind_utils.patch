@@ -1,0 +1,228 @@
+diff --git a/ostd/src/mm/page_table/cursor.rs b/ostd/src/mm/page_table/cursor.rs
+index d273b35c..e143672a 100644
+--- a/ostd/src/mm/page_table/cursor.rs
++++ b/ostd/src/mm/page_table/cursor.rs
+@@ -151,7 +151,7 @@ where
+     barrier_va: Range<Vaddr>,
+     #[allow(dead_code)]
+     irq_guard: DisabledLocalIrqGuard,
+-    _phantom: PhantomData<&'a PageTable<M, E, C>>,
++    pt: &'a PageTable<M, E, C>,
+ }
+ 
+ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<'a, M, E, C>
+@@ -182,7 +182,7 @@ where
+             va: va.start,
+             barrier_va: va.clone(),
+             irq_guard: trap::disable_local(),
+-            _phantom: PhantomData,
++            pt,
+         };
+ 
+         let mut cur_pt_addr = pt.root.paddr();
+@@ -226,6 +226,7 @@ where
+                     } else {
+                         MapTrackingStatus::Untracked
+                     };
++                    cursor.pt.stat_alloc();
+                     let pt = RawPageTableNode::<E, C>::alloc(cursor.level - 1, is_tracked);
+                     cur_pt_addr = pt.paddr();
+                     let _ = cur_entry.replace(Child::PageTable(pt));
+@@ -237,6 +238,7 @@ where
+                 } else if let Some(split_child) = cur_entry.split_if_huge_token() {
+                     let pt = split_child.into_raw();
+                     cur_pt_addr = pt.deref().paddr();
++                    cursor.pt.stat_alloc();
+                 } else {
+                     break;
+                 }
+@@ -494,6 +496,7 @@ where
+                     let lock = unsafe { pt.lock() };
+                     let _ = cur_entry.replace(Child::PageTable(pt));
+                     self.0.push_level(lock);
++                    self.0.pt.stat_alloc();
+                 }
+                 ChildRef::Page(_, _) => {
+                     panic!("Mapping a smaller page in an already mapped huge page");
+@@ -504,6 +507,7 @@ where
+                 ChildRef::Token(_) => {
+                     let split_child = cur_entry.split_if_huge_token().unwrap();
+                     self.0.push_level(split_child);
++                    self.0.pt.stat_alloc();
+                 }
+             }
+             continue;
+@@ -583,17 +587,22 @@ where
+                         let lock = unsafe { pt.lock() };
+                         let _ = cur_entry.replace(Child::PageTable(pt));
+                         self.0.push_level(lock);
++                        self.0.pt.stat_alloc();
+                     }
+                     ChildRef::Page(_, _) => {
+                         panic!("Mapping a smaller page in an already mapped huge page");
+                     }
+                     ChildRef::Untracked(_, _, _) => {
+                         let split_child = cur_entry.split_if_untracked_huge().unwrap();
++                        self.0.pt.stat_alloc();
+                         self.0.push_level(split_child);
++                        self.0.pt.stat_alloc();
+                     }
+                     ChildRef::Token(_) => {
+                         let split_child = cur_entry.split_if_huge_token().unwrap();
++                        self.0.pt.stat_alloc();
+                         self.0.push_level(split_child);
++                        self.0.pt.stat_alloc();
+                     }
+                 }
+                 continue;
+@@ -651,6 +660,7 @@ where
+                         let lock = unsafe { pt.lock() };
+                         let _ = cur_entry.replace(Child::PageTable(pt));
+                         self.0.push_level(lock);
++                        self.0.pt.stat_alloc();
+                     }
+                     ChildRef::Page(_, _) => {
+                         panic!("Marking a smaller page in an already mapped huge page");
+@@ -661,6 +671,7 @@ where
+                     ChildRef::Token(_) => {
+                         let split_child = cur_entry.split_if_huge_token().unwrap();
+                         self.0.push_level(split_child);
++                        self.0.pt.stat_alloc();
+                     }
+                 }
+                 continue;
+@@ -751,11 +762,14 @@ where
+                     }
+                     ChildRef::Untracked(_, _, _) => {
+                         let split_child = cur_entry.split_if_untracked_huge().unwrap();
++                        self.0.pt.stat_alloc();
+                         self.0.push_level(split_child);
+                     }
+                     ChildRef::Token(_) => {
+                         let split_child = cur_entry.split_if_huge_token().unwrap();
++                        self.0.pt.stat_alloc();
+                         self.0.push_level(split_child);
++                        self.0.pt.stat_alloc();
+                     }
+                 }
+                 continue;
+@@ -864,6 +878,7 @@ where
+                         .expect("Protecting part of a huge page")
+                 };
+                 self.0.push_level(split_child);
++                self.0.pt.stat_alloc();
+                 continue;
+             }
+ 
+diff --git a/ostd/src/mm/page_table/mod.rs b/ostd/src/mm/page_table/mod.rs
+index 1b2b8fc1..9df599a7 100644
+--- a/ostd/src/mm/page_table/mod.rs
++++ b/ostd/src/mm/page_table/mod.rs
+@@ -1,6 +1,6 @@
+ // SPDX-License-Identifier: MPL-2.0
+ 
+-use core::{fmt::Debug, marker::PhantomData, ops::Range};
++use core::{fmt::Debug, marker::PhantomData, ops::Range, sync::atomic::AtomicUsize};
+ 
+ use super::{
+     nr_subpage_per_huge, page::meta::MapTrackingStatus, page_prop::PageProperty, page_size,
+@@ -83,6 +83,8 @@ pub struct PageTable<
+     [(); C::NR_LEVELS as usize]:,
+ {
+     root: RawPageTableNode<E, C>,
++    nr_pages: AtomicUsize,
++    max_nr_pages: AtomicUsize,
+     _phantom: PhantomData<M>,
+ }
+ 
+@@ -138,6 +140,8 @@ impl PageTable<KernelMode> {
+ 
+         PageTable::<UserMode> {
+             root: new_node_raw,
++            nr_pages: AtomicUsize::new(1),
++            max_nr_pages: AtomicUsize::new(1),
+             _phantom: PhantomData,
+         }
+     }
+@@ -203,10 +207,25 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> PageTab
+ where
+     [(); C::NR_LEVELS as usize]:,
+ {
++    pub fn stat_alloc(&self) {
++        let nr = self
++            .nr_pages
++            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++        self.max_nr_pages
++            .fetch_max(nr + 1, core::sync::atomic::Ordering::Relaxed);
++    }
++
++    pub fn stat_nr_max_pages(&self) -> usize {
++        self.max_nr_pages
++            .load(core::sync::atomic::Ordering::Relaxed)
++    }
++
+     /// Create a new empty page table. Useful for the kernel page table and IOMMU page tables only.
+     pub fn empty() -> Self {
+         PageTable {
+             root: RawPageTableNode::<E, C>::alloc(C::NR_LEVELS, MapTrackingStatus::NotApplicable),
++            nr_pages: AtomicUsize::new(1),
++            max_nr_pages: AtomicUsize::new(1),
+             _phantom: PhantomData,
+         }
+     }
+@@ -270,6 +289,11 @@ where
+     pub unsafe fn shallow_copy(&self) -> Self {
+         PageTable {
+             root: self.root.clone_shallow(),
++            nr_pages: AtomicUsize::new(self.nr_pages.load(core::sync::atomic::Ordering::Relaxed)),
++            max_nr_pages: AtomicUsize::new(
++                self.max_nr_pages
++                    .load(core::sync::atomic::Ordering::Relaxed),
++            ),
+             _phantom: PhantomData,
+         }
+     }
+diff --git a/ostd/src/mm/vm_space.rs b/ostd/src/mm/vm_space.rs
+index 64cd5edc..ee138eee 100644
+--- a/ostd/src/mm/vm_space.rs
++++ b/ostd/src/mm/vm_space.rs
+@@ -191,6 +191,15 @@ impl Default for VmSpace {
+     }
+ }
+ 
++impl Drop for VmSpace {
++    fn drop(&mut self) {
++        crate::early_println!(
++            "Page table retired, {} pages used",
++            self.pt.stat_nr_max_pages()
++        );
++    }
++}
++
+ /// The cursor for querying over the VM space without modifying it.
+ ///
+ /// It exclusively owns a sub-tree of the page table, preventing others from
+diff --git a/start_linux.sh b/start_linux.sh
+index a60e44f1..19e732af 100755
+--- a/start_linux.sh
++++ b/start_linux.sh
+@@ -16,6 +16,7 @@ make initramfs
+     -drive if=none,format=raw,id=x0,file=test/build/ext2.img \
+     -device virtio-blk-pci,bus=pcie.0,addr=0x6,drive=x0,serial=vext2,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,config-wce=off,request-merging=off,write-cache=off,backend_defaults=off,discard=off,event_idx=off,indirect_desc=off,ioeventfd=off,queue_reset=off \
+     -netdev user,id=net01,hostfwd=tcp::11211-:11211 \
++    -qmp tcp:127.0.0.1:${QMP_PORT:-19889},server,nowait \
+     -device virtio-net-pci,netdev=net01,disable-legacy=on,disable-modern=off,mrg_rxbuf=off,ctrl_rx=off,ctrl_rx_extra=off,ctrl_vlan=off,ctrl_vq=off,ctrl_guest_offloads=off,ctrl_mac_addr=off,event_idx=off,queue_reset=off,guest_announce=off,indirect_desc=off \
+     -append 'console=ttyS0 rdinit=/usr/bin/busybox quiet mitigations=off hugepages=0 transparent_hugepage=never SHELL=/bin/sh LOGNAME=root HOME=/ USER=root PATH=/bin:/benchmark -- sh -l' \
+     -nographic
+diff --git a/tools/qemu_args.sh b/tools/qemu_args.sh
+index 602ad055..3bca7615 100755
+--- a/tools/qemu_args.sh
++++ b/tools/qemu_args.sh
+@@ -59,6 +59,7 @@ COMMON_QEMU_ARGS="\
+     -drive if=none,format=raw,id=x0,file=./test/build/ext2.img \
+     -drive if=none,format=raw,id=x1,file=./test/build/exfat.img \
+     -drive if=none,format=raw,id=x2,file=./test/build/metis.img \
++    -qmp tcp:127.0.0.1:${QMP_PORT:-19889},server,nowait \
+ "
+ 
+ if [ "$1" = "iommu" ]; then
