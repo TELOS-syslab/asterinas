@@ -16,18 +16,19 @@ use crate::{
 };
 
 /// A child of a page table node.
-///
-/// This is a owning handle to a child of a page table node. If the child is
-/// either a page table node or a page, it holds a reference count to the
-/// corresponding page.
 #[derive(Debug)]
 pub(in crate::mm) enum Child<
     E: PageTableEntryTrait = PageTableEntry,
     C: PagingConstsTrait = PagingConsts,
 > {
+    /// A owning handle to a raw page table node.
     PageTable(RawPageTableNode<E, C>),
+    /// A referece of a child page table node, in the form of a physical
+    /// address.
+    PageTableRef(Paddr),
+    /// A mapped frame.
     Frame(Frame<dyn AnyFrameMeta>, PageProperty),
-    /// Pages not tracked by handles.
+    /// Mapped frames that are not tracked by handles.
     Untracked(Paddr, PagingLevel, PageProperty),
     Token(Token),
     None,
@@ -50,6 +51,7 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
     ) -> bool {
         match self {
             Child::PageTable(pt) => node_level == pt.level() + 1,
+            Child::PageTableRef(_) => false,
             Child::Frame(p, _) => {
                 node_level == p.level() && is_tracked == MapTrackingStatus::Tracked
             }
@@ -74,6 +76,9 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
             Child::PageTable(pt) => {
                 let pt = ManuallyDrop::new(pt);
                 E::new_pt(pt.paddr())
+            }
+            Child::PageTableRef(_) => {
+                panic!("`PageTableRef` should not be converted to PTE");
             }
             Child::Frame(page, prop) => {
                 let level = page.level();
@@ -131,7 +136,16 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
         }
     }
 
-    /// Gains an extra owning reference to the child.
+    /// Gains an extra reference to the child.
+    ///
+    /// If the child is a frame, it increases the reference count of the frame.
+    ///
+    /// If the child is a page table node, the returned value depends on
+    /// `clone_raw`:
+    ///  - If `clone_raw` is `true`, it returns a new owning handle to the page
+    ///    table node ([`Child::PageTable`]).
+    ///  - If `clone_raw` is `false`, it returns a reference to the page table
+    ///    node ([`Child::PageTableRef`]).
     ///
     /// # Safety
     ///
@@ -140,10 +154,11 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
     ///
     /// This method must not be used with a PTE that has been restored to a
     /// child using the [`Child::from_pte`] method.
-    pub(super) unsafe fn clone_from_pte(
+    pub(super) unsafe fn ref_from_pte(
         pte: &E,
         level: PagingLevel,
         is_tracked: MapTrackingStatus,
+        clone_raw: bool,
     ) -> Self {
         if !pte.is_present() {
             let paddr = pte.paddr();
@@ -158,12 +173,18 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
         let paddr = pte.paddr();
 
         if !pte.is_last(level) {
-            // SAFETY: The physical address is valid and the PTE already owns
-            // the reference to the page.
-            unsafe { inc_frame_ref_count(paddr) };
-            // SAFETY: The physical address points to a valid page table node
-            // at the given level.
-            return Child::PageTable(unsafe { RawPageTableNode::from_raw_parts(paddr, level - 1) });
+            if clone_raw {
+                // SAFETY: The physical address is valid and the PTE already owns
+                // the reference to the page.
+                unsafe { inc_frame_ref_count(paddr) };
+                // SAFETY: The physical address points to a valid page table node
+                // at the given level.
+                return Child::PageTable(unsafe {
+                    RawPageTableNode::from_raw_parts(paddr, level - 1)
+                });
+            } else {
+                return Child::PageTableRef(paddr);
+            }
         }
 
         match is_tracked {
