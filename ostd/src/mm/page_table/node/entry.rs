@@ -49,7 +49,14 @@ impl<'a, E: PageTableEntryTrait, C: PagingConstsTrait> Entry<'a, E, C> {
     pub(in crate::mm) fn to_owned(&self) -> Child<E, C> {
         // SAFETY: The entry structure represents an existent entry with the
         // right node information.
-        unsafe { Child::clone_from_pte(&self.pte, self.node.level(), self.node.is_tracked()) }
+        unsafe { Child::ref_from_pte(&self.pte, self.node.level(), self.node.is_tracked(), true) }
+    }
+
+    /// Gets a reference to the child.
+    pub(in crate::mm) fn to_ref(&self) -> Child<E, C> {
+        // SAFETY: The entry structure represents an existent entry with the
+        // right node information.
+        unsafe { Child::ref_from_pte(&self.pte, self.node.level(), self.node.is_tracked(), false) }
     }
 
     /// Operates on the mapping properties of the entry.

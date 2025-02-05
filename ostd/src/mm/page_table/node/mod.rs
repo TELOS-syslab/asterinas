@@ -271,6 +271,27 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> PageTableNode<E, C> {
         unsafe { RawPageTableNode::from_raw_parts(this.page.start_paddr(), this.page.meta().level) }
     }
 
+    /// Converts the handle into a raw physical address.
+    ///
+    /// It will not release the lock. It may be paired with [`from_raw_paddr`] to
+    /// manually manage pointers.
+    pub(super) fn into_raw_paddr(self) -> Paddr {
+        let this = ManuallyDrop::new(self);
+        this.page.start_paddr()
+    }
+
+    /// Converts a raw physical address to a handle.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the physical address is valid and points to
+    /// a forgotten page table node (see [`Self::into_raw_paddr`]) that is not
+    /// yet restored.
+    pub(super) unsafe fn from_raw_paddr(paddr: Paddr) -> Self {
+        let page = Frame::<PageTablePageMeta<E, C>>::from_raw(paddr);
+        Self { page }
+    }
+
     /// Gets a raw handle while still preserving the original handle.
     pub(super) fn clone_raw(&self) -> RawPageTableNode<E, C> {
         let page = ManuallyDrop::new(self.page.clone());
