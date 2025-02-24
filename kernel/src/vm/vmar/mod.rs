@@ -478,7 +478,12 @@ impl Vmar_ {
 
     /// Clears all content of the root VMAR.
     fn clear_root_vmar(&self) -> Result<()> {
-        self.vm_space.clear();
+        {
+            let mut cursor = self
+                .vm_space
+                .cursor_mut(&(ROOT_VMAR_LOWEST_ADDR..ROOT_VMAR_CAP_ADDR))?;
+            cursor.unmap(ROOT_VMAR_CAP_ADDR - ROOT_VMAR_LOWEST_ADDR);
+        }
         self.allocator.clear();
         self.vmo_backed_id_alloc.store(1, Ordering::Release);
         self.vma_map.write().clear();

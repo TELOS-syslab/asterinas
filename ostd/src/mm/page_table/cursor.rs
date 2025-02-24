@@ -27,7 +27,7 @@ use align_ext::AlignExt;
 use super::{
     page_size, pte_index, Child, Entry, KernelMode, MapTrackingStatus, PageTable,
     PageTableEntryTrait, PageTableError, PageTableMode, PageTableNode, PagingConstsTrait,
-    PagingLevel, RawPageTableNode, UserMode,
+    PagingLevel, UserMode,
 };
 use crate::{
     mm::{
@@ -84,18 +84,12 @@ pub enum PageTableItem {
 /// provide concurrency.
 #[derive(Debug)]
 pub struct Cursor<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> {
-    /// The lock guards of the cursor. The level 1 page table lock guard is at
-    /// index 0, and the level N page table lock guard is at index N - 1.
-    ///
-    /// When destructing the cursor, the locks will be released in the order
-    /// from low to high, exactly the reverse order of the acquisition.
-    /// This behavior is ensured by the default drop implementation of Rust:
-    /// <https://doc.rust-lang.org/reference/destructors.html>.
-    guards: [Option<PageTableNode<E, C>>; MAX_NR_LEVELS],
+    /// The current node path of the cursor.
+    path: [Option<ManuallyDrop<PageTableNode<E, C>>>; MAX_NR_LEVELS],
     /// The level of the page table that the cursor points to.
     level: PagingLevel,
-    /// From `guard_level` to `level`, the locks are held in `guards`.
-    guard_level: PagingLevel,
+    /// The level of the sub-tree root which has locked PTEs.
+    root_level: PagingLevel,
     /// The current virtual address that the cursor points to.
     va: Vaddr,
     /// The virtual address range that is locked.
@@ -116,30 +110,27 @@ const MAX_NR_LEVELS: usize = 4;
 /// The function will forget all the [`PageTableNode`] objects in the sub-tree
 /// with [`PageTableNode::into_raw_paddr`].
 fn dfs_acquire_lock<E: PageTableEntryTrait, C: PagingConstsTrait>(
-    cur_node: &mut PageTableNode<E, C>,
+    cur_node: &PageTableNode<E, C>,
     cur_node_va: Vaddr,
-    va_range: Range<Vaddr>,
+    va_range: &Range<Vaddr>,
 ) {
     let cur_level = cur_node.level();
-    let idx_range = dfs_get_idx_range::<C>(cur_level, cur_node_va, &va_range);
+    let idx_range = get_idx_range::<C>(cur_level, cur_node_va, va_range);
     for i in idx_range {
+        unsafe { cur_node.lock(i) };
+
         let child = cur_node.entry(i);
-        match child.to_owned() {
-            Child::PageTable(pt) => {
+        match child.to_ref() {
+            Child::PageTableRef(pt) => {
                 debug_assert!(cur_level > 1);
-                let mut pt = pt.lock();
                 let child_node_va = cur_node_va + i * page_size::<C>(cur_level);
-                let child_node_va_end = child_node_va + page_size::<C>(cur_level);
-                let va_start = va_range.start.max(child_node_va);
-                let va_end = va_range.end.min(child_node_va_end);
-                dfs_acquire_lock(&mut pt, child_node_va, va_start..va_end);
-                pt.into_raw_paddr();
+                dfs_acquire_lock(&pt, child_node_va, va_range);
             }
             Child::None
             | Child::Frame(_, _)
             | Child::Untracked(_, _, _)
             | Child::Token(_)
-            | Child::PageTableRef(_) => {}
+            | Child::PageTable(_) => {}
         }
     }
 }
@@ -151,25 +142,19 @@ fn dfs_acquire_lock<E: PageTableEntryTrait, C: PagingConstsTrait>(
 /// The function must be called only once, after the locks are acquired by
 /// [`dfs_acquire_lock`] with the same arguments.
 unsafe fn dfs_release_lock<E: PageTableEntryTrait, C: PagingConstsTrait>(
-    mut cur_node: PageTableNode<E, C>,
+    cur_node: &PageTableNode<E, C>,
     cur_node_va: Vaddr,
-    va_range: Range<Vaddr>,
+    va_range: &Range<Vaddr>,
 ) {
     let cur_level = cur_node.level();
-    let idx_range = dfs_get_idx_range::<C>(cur_level, cur_node_va, &va_range);
+    let idx_range = get_idx_range::<C>(cur_level, cur_node_va, va_range);
     for i in idx_range.rev() {
         let child = cur_node.entry(i);
         match child.to_ref() {
             Child::PageTableRef(pt) => {
                 debug_assert!(cur_level > 1);
-                // SAFETY: Caller ensures that the node was locked before.
-                let child_node = unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) };
-
                 let child_node_va = cur_node_va + i * page_size::<C>(cur_level);
-                let child_node_va_end = child_node_va + page_size::<C>(cur_level);
-                let va_start = va_range.start.max(child_node_va);
-                let va_end = va_range.end.min(child_node_va_end);
-                dfs_release_lock(child_node, child_node_va, va_start..va_end);
+                dfs_release_lock(&pt, child_node_va, va_range);
             }
             Child::None
             | Child::Frame(_, _)
@@ -177,21 +162,24 @@ unsafe fn dfs_release_lock<E: PageTableEntryTrait, C: PagingConstsTrait>(
             | Child::Token(_)
             | Child::PageTable(_) => {}
         }
+        unsafe { cur_node.unlock(i) };
     }
-
-    drop(cur_node); // The release happens here.
 }
 
-fn dfs_get_idx_range<C: PagingConstsTrait>(
-    cur_node_level: PagingLevel,
-    cur_node_va: Vaddr,
+/// Gets the index range of a node corresponding to a virtual address range.
+///
+/// If the `va_range` is larger than the node's virtual address range, the
+/// exceeding part will be ignored.
+fn get_idx_range<C: PagingConstsTrait>(
+    node_level: PagingLevel,
+    node_va: Vaddr,
     va_range: &Range<Vaddr>,
 ) -> Range<usize> {
-    debug_assert!(va_range.start >= cur_node_va);
-    debug_assert!(va_range.end <= cur_node_va + page_size::<C>(cur_node_level + 1));
+    let va_start = va_range.start.max(node_va);
+    let va_end = va_range.end.min(node_va + page_size::<C>(node_level + 1));
 
-    let start_idx = (va_range.start - cur_node_va) / page_size::<C>(cur_node_level);
-    let end_idx = (va_range.end - cur_node_va).div_ceil(page_size::<C>(cur_node_level));
+    let start_idx = (va_start - node_va) / page_size::<C>(node_level);
+    let end_idx = (va_end - node_va).div_ceil(page_size::<C>(node_level));
 
     debug_assert!(start_idx < end_idx);
     debug_assert!(end_idx <= nr_subpage_per_huge::<C>());
@@ -201,15 +189,12 @@ fn dfs_get_idx_range<C: PagingConstsTrait>(
 
 impl<M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Drop for Cursor<'_, M, E, C> {
     fn drop(&mut self) {
-        for i in (0..self.guard_level as usize - 1).rev() {
-            if let Some(guard) = self.guards[i].take() {
-                let _ = guard.into_raw_paddr();
-            }
-        }
-        let guard_node = self.guards[self.guard_level as usize - 1].take().unwrap();
-        let cur_node_va = self.barrier_va.start / page_size::<C>(self.guard_level + 1)
-            * page_size::<C>(self.guard_level + 1);
-        unsafe { dfs_release_lock(guard_node, cur_node_va, self.barrier_va.clone()) };
+        let guard_node = self.path[self.root_level as usize - 1].take().unwrap();
+        let cur_node_va = self
+            .barrier_va
+            .start
+            .align_down(page_size::<C>(self.root_level + 1));
+        unsafe { dfs_release_lock(&guard_node, cur_node_va, &self.barrier_va) };
     }
 }
 
@@ -233,9 +218,9 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
         const { assert!(C::NR_LEVELS as usize <= MAX_NR_LEVELS) };
 
         let mut cursor = Self {
-            guards: core::array::from_fn(|_| None),
+            path: core::array::from_fn(|_| None),
             level: C::NR_LEVELS,
-            guard_level: C::NR_LEVELS,
+            root_level: C::NR_LEVELS,
             va: va.start,
             barrier_va: va.clone(),
             irq_guard: trap::disable_local(),
@@ -244,10 +229,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
 
         let mut cur_pt_addr = pt.root.paddr();
 
-        // Go down and get proper locks. The cursor should hold a lock of a
-        // page table node containing the virtual address range.
-        //
-        // While going down, previous guards of too-high levels will be released.
+        // Go down and find the sub-tree that contains the virtual address range.
         loop {
             let start_idx = pte_index::<C>(va.start, cursor.level);
             let level_too_high = {
@@ -276,10 +258,12 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
                 // and allocate a new page table node.
                 // SAFETY: The address and level corresponds to a child converted into
                 // a PTE and we clone it to get a new handle to the node.
-                let raw =
-                    unsafe { RawPageTableNode::<E, C>::from_raw_parts(cur_pt_addr, cursor.level) };
-                let _inc_ref = ManuallyDrop::new(raw.clone_shallow());
-                let mut node = raw.lock();
+                let node = ManuallyDrop::new(unsafe {
+                    PageTableNode::<E, C>::from_raw_paddr(cur_pt_addr)
+                });
+
+                unsafe { node.lock(start_idx) };
+
                 let cur_entry = node.entry(start_idx);
                 if cur_entry.is_none() {
                     let is_tracked = if should_map_as_tracked(va.start) {
@@ -287,19 +271,23 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
                     } else {
                         MapTrackingStatus::Untracked
                     };
-                    let pt = PageTableNode::<E, C>::alloc(cursor.level - 1, is_tracked);
-                    let pt = pt.into_raw();
+                    let pt = PageTableNode::<E, C>::alloc(cursor.level - 1, is_tracked, 0..0);
                     cur_pt_addr = pt.paddr();
-                    let _ = cur_entry.replace(Child::PageTable(pt));
+                    unsafe { node.unlock(start_idx) };
+                    let _ = unsafe { cur_entry.replace(Child::PageTable(pt)) };
                 } else if cur_entry.is_node() {
-                    let Child::PageTable(pt) = cur_entry.to_owned() else {
+                    let Child::PageTableRef(pt) = cur_entry.to_ref() else {
                         unreachable!();
                     };
                     cur_pt_addr = pt.paddr();
-                } else if let Some(split_child) = cur_entry.split_if_huge_token() {
-                    let pt = split_child.into_raw();
-                    cur_pt_addr = pt.paddr();
+
+                    unsafe { node.unlock(start_idx) };
+                } else if let Some(split_child) = unsafe { cur_entry.split_if_huge_token(0..0) } {
+                    cur_pt_addr = split_child.paddr();
+
+                    unsafe { node.unlock(start_idx) };
                 } else {
+                    unsafe { node.unlock(start_idx) };
                     break;
                 }
             }
@@ -308,18 +296,16 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
 
         // SAFETY: The address and level corresponds to a child converted into
         // a PTE and we clone it to get a new handle to the node.
-        let raw = unsafe { RawPageTableNode::<E, C>::from_raw_parts(cur_pt_addr, cursor.level) };
-        let _inc_ref = ManuallyDrop::new(raw.clone_shallow());
-        let mut lock = raw.lock();
+        let node = ManuallyDrop::new(unsafe { PageTableNode::<E, C>::from_raw_paddr(cur_pt_addr) });
 
         dfs_acquire_lock(
-            &mut lock,
+            &node,
             va.start.align_down(page_size::<C>(cursor.level + 1)),
-            va.clone(),
+            va,
         );
 
-        cursor.guards[cursor.level as usize - 1] = Some(lock);
-        cursor.guard_level = cursor.level;
+        cursor.path[cursor.level as usize - 1] = Some(node);
+        cursor.root_level = cursor.level;
 
         Ok(cursor)
     }
@@ -336,7 +322,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
 
             match self.cur_entry().to_ref() {
                 Child::PageTableRef(pt) => {
-                    self.push_level(unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) });
+                    self.push_level(pt);
                     continue;
                 }
                 Child::PageTable(_) => {
@@ -378,7 +364,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
     pub(in crate::mm) fn move_forward(&mut self) {
         let page_size = page_size::<C>(self.level);
         let next_va = self.va.align_down(page_size) + page_size;
-        while self.level < self.guard_level && pte_index::<C>(next_va, self.level) == 0 {
+        while self.level < self.root_level && pte_index::<C>(next_va, self.level) == 0 {
             self.pop_level();
         }
         self.va = next_va;
@@ -407,12 +393,12 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
 
             // There is a corner case that the cursor is depleted, sitting at the start of the
             // next node but the next node is not locked because the parent is not locked.
-            if self.va >= self.barrier_va.end && self.level == self.guard_level {
+            if self.va >= self.barrier_va.end && self.level == self.root_level {
                 self.va = va;
                 return Ok(());
             }
 
-            debug_assert!(self.level < self.guard_level);
+            debug_assert!(self.level < self.root_level);
             self.pop_level();
         }
     }
@@ -423,22 +409,17 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
 
     /// Goes up a level.
     fn pop_level(&mut self) {
-        let Some(taken) = self.guards[self.level as usize - 1].take() else {
-            panic!("Popping a level without a lock");
-        };
-        let _taken = taken.into_raw_paddr();
+        let _ = self.path[self.level as usize - 1]
+            .take()
+            .expect("Popping a level not on the path");
         self.level += 1;
     }
 
     /// Goes down a level to a child page table.
-    ///
-    /// The lock on the child page table is held until the next [`Self::pop_level`]
-    /// call at the same level.
-    fn push_level(&mut self, child_pt: PageTableNode<E, C>) {
+    fn push_level(&mut self, child_pt: ManuallyDrop<PageTableNode<E, C>>) {
         self.level -= 1;
         debug_assert_eq!(self.level, child_pt.level());
-
-        self.guards[self.level as usize - 1] = Some(child_pt);
+        self.path[self.level as usize - 1] = Some(child_pt);
     }
 
     fn should_map_as_tracked(&self) -> bool {
@@ -447,8 +428,8 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> Cursor<
             && should_map_as_tracked(self.va)
     }
 
-    fn cur_entry(&mut self) -> Entry<'_, E, C> {
-        let node = self.guards[self.level as usize - 1].as_mut().unwrap();
+    fn cur_entry(&self) -> Entry<'_, E, C> {
+        let node = self.path[self.level as usize - 1].as_ref().unwrap();
         node.entry(pte_index::<C>(self.va, self.level))
     }
 }
@@ -545,20 +526,24 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
         {
             debug_assert!(self.0.should_map_as_tracked());
             let cur_level = self.0.level;
+            let child_range = self.get_child_lock_range();
             let cur_entry = self.0.cur_entry();
             match cur_entry.to_ref() {
                 Child::PageTableRef(pt) => {
-                    self.0
-                        .push_level(unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) });
+                    self.0.push_level(pt);
                 }
                 Child::PageTable(_) => {
                     unreachable!();
                 }
                 Child::None => {
-                    let pt =
-                        PageTableNode::<E, C>::alloc(cur_level - 1, MapTrackingStatus::Tracked);
-                    let _ = cur_entry.replace(Child::PageTable(pt.clone_raw()));
-                    self.0.push_level(pt);
+                    let pt = PageTableNode::<E, C>::alloc(
+                        cur_level - 1,
+                        MapTrackingStatus::Tracked,
+                        child_range,
+                    );
+                    let pt_ref = unsafe { pt.get_manual_ref() };
+                    let _ = cur_entry.replace(Child::PageTable(pt));
+                    self.0.push_level(pt_ref);
                 }
                 Child::Frame(_, _) => {
                     panic!("Mapping a smaller page in an already mapped huge page");
@@ -567,7 +552,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                     panic!("Mapping a tracked page in an untracked range");
                 }
                 Child::Token(_) => {
-                    let split_child = cur_entry.split_if_huge_token().unwrap();
+                    let split_child = cur_entry.split_if_huge_token(child_range).unwrap();
                     self.0.push_level(split_child);
                 }
             }
@@ -635,11 +620,11 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                 || pa % page_size::<C>(self.0.level) != 0
             {
                 let cur_level = self.0.level;
+                let child_range = self.get_child_lock_range();
                 let cur_entry = self.0.cur_entry();
                 match cur_entry.to_ref() {
                     Child::PageTableRef(pt) => {
-                        self.0
-                            .push_level(unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) });
+                        self.0.push_level(pt);
                     }
                     Child::PageTable(_) => {
                         unreachable!();
@@ -648,19 +633,21 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                         let pt = PageTableNode::<E, C>::alloc(
                             cur_level - 1,
                             MapTrackingStatus::Untracked,
+                            child_range,
                         );
-                        let _ = cur_entry.replace(Child::PageTable(pt.clone_raw()));
-                        self.0.push_level(pt);
+                        let pt_ref = unsafe { pt.get_manual_ref() };
+                        let _ = cur_entry.replace(Child::PageTable(pt));
+                        self.0.push_level(pt_ref);
                     }
                     Child::Frame(_, _) => {
                         panic!("Mapping a smaller page in an already mapped huge page");
                     }
                     Child::Untracked(_, _, _) => {
-                        let split_child = cur_entry.split_if_untracked_huge().unwrap();
+                        let split_child = cur_entry.split_if_untracked_huge(child_range).unwrap();
                         self.0.push_level(split_child);
                     }
                     Child::Token(_) => {
-                        let split_child = cur_entry.split_if_huge_token().unwrap();
+                        let split_child = cur_entry.split_if_huge_token(child_range).unwrap();
                         self.0.push_level(split_child);
                     }
                 }
@@ -707,20 +694,24 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                 } else {
                     MapTrackingStatus::Untracked
                 };
+                let child_range = self.get_child_lock_range();
                 let cur_entry = self.0.cur_entry();
                 match cur_entry.to_ref() {
                     Child::PageTableRef(pt) => {
-                        self.0
-                            .push_level(unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) });
+                        self.0.push_level(pt);
                     }
                     Child::PageTable(_) => {
                         unreachable!();
                     }
                     Child::None => {
-                        let pt =
-                            PageTableNode::<E, C>::alloc(cur_level - 1, should_track_if_created);
-                        let _ = cur_entry.replace(Child::PageTable(pt.clone_raw()));
-                        self.0.push_level(pt);
+                        let pt = PageTableNode::<E, C>::alloc(
+                            cur_level - 1,
+                            should_track_if_created,
+                            child_range,
+                        );
+                        let pt_ref = unsafe { pt.get_manual_ref() };
+                        let _ = unsafe { cur_entry.replace(Child::PageTable(pt)) };
+                        self.0.push_level(pt_ref);
                     }
                     Child::Frame(_, _) => {
                         panic!("Marking a smaller page in an already mapped huge page");
@@ -729,7 +720,8 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                         panic!("Marking an already untracked mapped page");
                     }
                     Child::Token(_) => {
-                        let split_child = cur_entry.split_if_huge_token().unwrap();
+                        let split_child =
+                            unsafe { cur_entry.split_if_huge_token(child_range).unwrap() };
                         self.0.push_level(split_child);
                     }
                 }
@@ -739,8 +731,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
             let cur_entry = self.0.cur_entry();
             match cur_entry.to_ref() {
                 Child::PageTableRef(pt) => {
-                    self.0
-                        .push_level(unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) });
+                    self.0.push_level(pt);
                     continue;
                 }
                 Child::PageTable(_) => {
@@ -756,7 +747,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
             }
 
             // Mark the current page.
-            let _ = cur_entry.replace(Child::Token(token));
+            let _ = unsafe { cur_entry.replace(Child::Token(token)) };
 
             // Move forward.
             self.0.move_forward();
@@ -810,22 +801,11 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
 
             // Go down if not applicable.
             if cur_va % page_size::<C>(cur_level) != 0 || cur_va + page_size::<C>(cur_level) > end {
+                let child_range = self.get_child_lock_range();
                 let child = cur_entry.to_ref();
                 match child {
                     Child::PageTableRef(pt) => {
-                        let pt = unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) };
-                        // If there's no mapped PTEs in the next level, we can
-                        // skip to save time.
-                        if pt.nr_children() != 0 {
-                            self.0.push_level(pt);
-                        } else {
-                            if self.0.va + page_size::<C>(self.0.level) > end {
-                                self.0.va = end;
-                                break;
-                            }
-                            pt.into_raw_paddr();
-                            self.0.move_forward();
-                        }
+                        self.0.push_level(pt);
                     }
                     Child::PageTable(_) => {
                         unreachable!();
@@ -837,11 +817,11 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                         panic!("Removing part of a huge page");
                     }
                     Child::Untracked(_, _, _) => {
-                        let split_child = cur_entry.split_if_untracked_huge().unwrap();
+                        let split_child = cur_entry.split_if_untracked_huge(child_range).unwrap();
                         self.0.push_level(split_child);
                     }
                     Child::Token(_) => {
-                        let split_child = cur_entry.split_if_huge_token().unwrap();
+                        let split_child = cur_entry.split_if_huge_token(child_range).unwrap();
                         self.0.push_level(split_child);
                     }
                 }
@@ -876,7 +856,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                 Child::PageTable(pt) => PageTableItem::ChildPageTable {
                     va: self.0.va,
                     len: page_size::<C>(self.0.level),
-                    pt: Frame::from(pt).into(),
+                    pt: pt.into_frame().into(),
                 },
                 Child::None | Child::PageTableRef(_) => unreachable!(),
             };
@@ -935,26 +915,19 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                 let Child::PageTableRef(pt) = cur_entry.to_ref() else {
                     unreachable!("Already checked");
                 };
-                let pt = unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) };
-                // If there's no mapped PTEs in the next level, we can
-                // skip to save time.
-                if pt.nr_children() != 0 {
-                    self.0.push_level(pt);
-                } else {
-                    pt.into_raw_paddr();
-                    self.0.move_forward();
-                }
+                self.0.push_level(pt);
                 continue;
             }
 
             // Go down if the page size is too big and we are protecting part
             // of tokens or untracked huge pages.
             if cur_va % page_size::<C>(cur_level) != 0 || cur_va + page_size::<C>(cur_level) > end {
+                let child_range = self.get_child_lock_range();
                 let split_child = if cur_entry.is_token() {
-                    cur_entry.split_if_huge_token().unwrap()
+                    cur_entry.split_if_huge_token(child_range).unwrap()
                 } else {
                     cur_entry
-                        .split_if_untracked_huge()
+                        .split_if_untracked_huge(child_range)
                         .expect("Protecting part of a huge page")
                 };
                 self.0.push_level(split_child);
@@ -1023,15 +996,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
 
             match src_entry.to_ref() {
                 Child::PageTableRef(pt) => {
-                    let pt = unsafe { PageTableNode::<E, C>::from_raw_paddr(pt) };
-                    // If there's no mapped PTEs in the next level, we can
-                    // skip to save time.
-                    if pt.nr_children() != 0 {
-                        src.0.push_level(pt);
-                    } else {
-                        pt.into_raw_paddr();
-                        src.0.move_forward();
-                    }
+                    src.0.push_level(pt);
                     continue;
                 }
                 Child::PageTable(_) => {
@@ -1074,5 +1039,14 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> CursorM
                 }
             }
         }
+    }
+
+    fn get_child_lock_range(&self) -> Range<usize> {
+        debug_assert!(self.0.level > 1);
+        get_idx_range::<C>(
+            self.0.level - 1,
+            self.0.va.align_down(page_size::<C>(self.0.level)),
+            &self.0.barrier_va,
+        )
     }
 }
