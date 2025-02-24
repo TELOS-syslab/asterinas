@@ -60,15 +60,6 @@ impl VmSpace {
         }
     }
 
-    /// Clears the user space mappings in the page table.
-    ///
-    /// This method returns error if the page table is activated on any other
-    /// CPUs or there are any cursors alive.
-    pub fn clear(&self) {
-        let flusher = TlbFlusher::new(&self.cpus);
-        self.pt.clear(flusher);
-    }
-
     /// Gets an immutable cursor in the virtual address range.
     ///
     /// The cursor behaves like a lock guard, exclusively owning a sub-tree of
