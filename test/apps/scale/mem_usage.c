@@ -4,60 +4,34 @@
 
 void *worker_thread(void *arg)
 {
-	thread_data_t *data = (thread_data_t *)arg;
+	thread_start();
 
-	long tsc_start, tsc_end;
-	long tot_lat = 0;
-
-	// Wait for the main thread to signal that all threads are ready
-	while (__atomic_load_n(&DISPATCH_LIGHT, __ATOMIC_ACQUIRE) == 0) {
-		sched_yield();
-	}
-	tsc_start = rdtsc();
+	size_t num_pages_per_thread = NUM_PAGES / data->tot_threads;
 
 	// Trigger page fault one by one
-	for (size_t i = 0; i < NUM_PAGES; i++) {
-		long req_start = rdtsc();
-
-		data->base[data->offset[i]] = 1;
-
-		long req_end = rdtsc();
-		tot_lat += req_end - req_start;
-		while (req_end - req_start <= data->interval) {
-			req_end = rdtsc();
-		}
+	for (size_t i = 0; i < num_pages_per_thread; i++) {
+		data->base[(data->thread_id * num_pages_per_thread + i) *
+			   PAGE_SIZE] = 1;
 	}
 
-	tsc_end = rdtsc();
-	long tot_time = get_time_in_nanos(tsc_start, tsc_end);
+	// Barrier at here. Output pagetable size and vma tree size.
 
-	data->tput = 1000000000L * NUM_PAGES / tot_time;
-	data->lat = get_time_in_nanos(0, tot_lat) / NUM_PAGES;
-
-	return NULL;
+	thread_end(num_pages_per_thread);
 }
 
 int main(int argc, char *argv[])
 {
-	int ret;
+	printf("***MEM_USAGE_SIM***\n");
 
-	int one_multi = 1;
-	int near_far = 0;
-	int dist_rand = 0;
-
-	printf("***MEM_USAGE_SIM %s %s %s***\n",
-	       one_multi ? "MULTI_VMAS" : "ONE_VMA", near_far ? "FAR" : "NEAR",
-	       dist_rand ? "RAND" : "DIST");
-	ret = entry_point(argc, argv, worker_thread,
-			  (test_config_t){ .num_requests_per_thread = NUM_PAGES,
-					   .num_pages_per_request = 1,
-					   .mmap_before_spawn = 1,
-					   .trigger_fault_before_spawn = 0,
-					   .multi_vma_assign_requests =
-						   one_multi,
-					   .far_assign_requests = near_far,
-					   .rand_assign_requests = dist_rand,
-					   .is_unfixed_mmap_test = 0 });
+	int ret = entry_point(argc, argv, worker_thread,
+			      (test_config_t){ .num_total_pages = NUM_PAGES,
+					       .num_requests_per_thread = 0,
+					       .num_pages_per_request = 0,
+					       .mmap_before_spawn = 0,
+					       .trigger_fault_before_spawn = 0,
+					       .multi_vma_assign_requests = 0,
+					       .contention_level = 0,
+					       .is_unfixed_mmap_test = 0 });
 	if (ret != 0) {
 		perror("entry_point failed");
 		exit(EXIT_FAILURE);
