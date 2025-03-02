@@ -39,12 +39,24 @@ size_t up_align(size_t size, size_t alignment)
 // Statistics are per-thread basis.
 #define TOT_THREAD_RUNS 4096
 
-// How many times should the p99 lat exceed the avg lat
-#define P99LAT_LIMIT 10.0
-
 char *const BASE_PTR = (char *)0x100000000UL;
 
 #define RESULT_FILE "results"
+
+#define thread_start()                                                     \
+	thread_data_t *data = (thread_data_t *)arg;                        \
+	long tsc_start, tsc_end;                                           \
+	/* Wait for the main thread to signal that all threads are ready*/ \
+	while (__atomic_load_n(&DISPATCH_LIGHT, __ATOMIC_ACQUIRE) == 0) {  \
+		sched_yield();                                             \
+	}                                                                  \
+	tsc_start = rdtsc();
+
+#define thread_end(num_requests)                               \
+	tsc_end = rdtsc();                                     \
+	long tot_time = get_time_in_nanos(tsc_start, tsc_end); \
+	data->lat = tot_time / (num_requests);                 \
+	return NULL;
 
 int DISPATCH_LIGHT;
 
@@ -53,35 +65,34 @@ typedef struct {
 	long *offset;
 	int thread_id;
 	int tot_threads;
-	// Wait until interval to proceed the next interrupt
-	long interval;
 	int is_unfixed_mmap_test;
 
-	// Pass the result back to the main thread
-	// Latency (ns)
+	// Pass the latency(ns) result back to the main thread
 	long lat;
-	// Throughput per sec
-	long tput;
 } thread_data_t;
 
 typedef struct {
+	// Only for mem usage tests
+	size_t num_total_pages;
+
+	// Only for time usage tests
 	size_t num_requests_per_thread;
 	size_t num_pages_per_request;
 	int mmap_before_spawn;
 	int trigger_fault_before_spawn;
 	int multi_vma_assign_requests;
-	int far_assign_requests;
-	int rand_assign_requests;
+	int contention_level;
 	int is_unfixed_mmap_test;
 } test_config_t;
 
-// Throughput per sec
+const char contention_level_name[3][20] = { "LOW_CONTENTION", "MID_CONTENTION",
+					    "HIGH_CONTENTION" };
+
 typedef struct {
-	long avgtput;
 	long avglat;
 	long medlat;
 	long p99lat;
-} throughput_result_t;
+} latency_result_t;
 
 // Decls
 
@@ -92,12 +103,11 @@ void run_test_specify_threads(int num_threads, void *(*worker_thread)(void *),
 void run_test_and_print(int num_threads, void *(*worker_thread)(void *),
 			test_config_t config);
 void run_test_specify_rounds(int num_threads, void *(*worker_thread)(void *),
-			     test_config_t config, long interval,
-			     throughput_result_t *result);
+			     test_config_t config, latency_result_t *result);
 void run_test_forked(int num_threads, void *(*worker_thread)(void *),
-		     test_config_t config, long interval);
+		     test_config_t config);
 void run_test(int num_threads, void *(*worker_thread)(void *),
-	      test_config_t config, long interval);
+	      test_config_t config);
 
 // Impls
 
@@ -122,7 +132,7 @@ int entry_point(int argc, char *argv[], void *(*worker_thread)(void *),
 void run_test_specify_threads(int num_threads, void *(*worker_thread)(void *),
 			      test_config_t config)
 {
-	printf("Threads, Tot Tput (ops/s), Avg Lat (ns), Med Lat (ns), p99 Lat (ns)\n");
+	printf("Threads, Avg Lat (ns), Med Lat (ns), p99 Lat (ns)\n");
 
 	// Gets the number of CPUS via sched_affinity
 	cpu_set_t cpuset;
@@ -147,62 +157,52 @@ void run_test_specify_threads(int num_threads, void *(*worker_thread)(void *),
 void run_test_and_print(int num_threads, void *(*worker_thread)(void *),
 			test_config_t config)
 {
-	throughput_result_t result;
-	run_test_specify_rounds(num_threads, worker_thread, config, 0, &result);
-	printf("%d, %ld, %ld, %ld, %ld\n", num_threads,
-	       result.avgtput * num_threads, result.avglat, result.medlat,
+	latency_result_t result;
+	run_test_specify_rounds(num_threads, worker_thread, config, &result);
+	printf("%d, %ld, %ld, %ld\n", num_threads, result.avglat, result.medlat,
 	       result.p99lat);
 }
 
 pthread_t threads[TOT_THREAD_RUNS];
 thread_data_t thread_data[TOT_THREAD_RUNS];
-long thread_tput[TOT_THREAD_RUNS];
 long thread_lat[TOT_THREAD_RUNS];
 
 void run_test_specify_rounds(int num_threads, void *(*worker_thread)(void *),
-			     test_config_t config, long interval,
-			     throughput_result_t *result)
+			     test_config_t config, latency_result_t *result)
 {
 	remove(RESULT_FILE);
 
 	int runs = TOT_THREAD_RUNS / num_threads;
 	for (int run_id = 0; run_id < runs; run_id++) {
-		run_test_forked(num_threads, worker_thread, config, interval);
+		run_test_forked(num_threads, worker_thread, config);
 	}
 
-	// Read throughputs and latencies data from RESULT_FILE
+	// Read latencies data from RESULT_FILE
 	FILE *file = fopen(RESULT_FILE, "r");
 	if (file == NULL) {
 		perror("fopen failed");
 		exit(EXIT_FAILURE);
 	}
 	int tot_runs = num_threads * runs;
-	long tput = 0, lat = 0;
+	long lat = 0;
 	for (int i = 0; i < tot_runs; i++) {
-		if (fscanf(file, "%ld", &tput) != 1) {
-			perror("Incorrect number of runs");
-			exit(EXIT_FAILURE);
-		}
 		if (fscanf(file, "%ld", &lat) != 1) {
 			perror("Incorrect number of runs");
 			exit(EXIT_FAILURE);
 		}
-		thread_tput[i] = tput;
 		thread_lat[i] = lat;
 	}
-	if (fscanf(file, "%ld", &tput) == 1) {
+	if (fscanf(file, "%ld", &lat) == 1) {
 		perror("Incorrect number of runs");
 		exit(EXIT_FAILURE);
 	}
 	fclose(file);
 
-	long avgtput = 0, avglat = 0, medlat = 0, p99lat = 0;
+	long avglat = 0, medlat = 0, p99lat = 0;
 
 	for (int i = 0; i < tot_runs; i++) {
-		avgtput += thread_tput[i];
 		avglat += thread_lat[i];
 	}
-	avgtput /= tot_runs;
 	avglat /= tot_runs;
 
 	// Calculate the p99 lat
@@ -219,7 +219,6 @@ void run_test_specify_rounds(int num_threads, void *(*worker_thread)(void *),
 	medlat = thread_lat[tot_runs / 2];
 	p99lat = thread_lat[tot_runs * 99 / 100];
 
-	result->avgtput = avgtput;
 	result->avglat = avglat;
 	result->medlat = medlat;
 	result->p99lat = p99lat;
@@ -228,7 +227,7 @@ void run_test_specify_rounds(int num_threads, void *(*worker_thread)(void *),
 }
 
 void run_test_forked(int num_threads, void *(*worker_thread)(void *),
-		     test_config_t config, long interval)
+		     test_config_t config)
 {
 	// Spawn a process for a test in order to avoid interference between tests
 	int pid = fork();
@@ -237,7 +236,7 @@ void run_test_forked(int num_threads, void *(*worker_thread)(void *),
 		exit(EXIT_FAILURE);
 	} else if (pid == 0) {
 		// Child process
-		run_test(num_threads, worker_thread, config, interval);
+		run_test(num_threads, worker_thread, config);
 		exit(EXIT_SUCCESS);
 	} else {
 		// Parent process
@@ -246,81 +245,118 @@ void run_test_forked(int num_threads, void *(*worker_thread)(void *),
 }
 
 void run_test(int num_threads, void *(*worker_thread)(void *),
-	      test_config_t cfg, long interval)
+	      test_config_t cfg)
 {
-	size_t num_tot_requests = cfg.num_requests_per_thread * num_threads;
-
-	int offset_size = up_align(num_tot_requests * sizeof(long), PAGE_SIZE);
-	long *offset = mmap(NULL, offset_size, PROT_READ | PROT_WRITE,
-			    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-	unsigned long reserved_region_size = -1;
-	if (cfg.far_assign_requests) {
-		reserved_region_size = 512UL * PAGE_SIZE;
-	} else {
-		reserved_region_size = cfg.num_pages_per_request * PAGE_SIZE;
-	}
-	for (int i = 0; i < num_tot_requests; i++) {
-		offset[i] = i * reserved_region_size;
-	}
-
 	char *base = NULL;
-	if (cfg.mmap_before_spawn) {
-		// munmap or pagefault tests
-		if (cfg.multi_vma_assign_requests) {
-			// Each request is in one VMA
-			base = BASE_PTR;
-			for (int i = 0; i < num_tot_requests; i++) {
-				char *temp = mmap(
-					base + offset[i],
-					cfg.num_pages_per_request * PAGE_SIZE,
-					PROT_READ | PROT_WRITE,
-					MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS,
-					-1, 0);
-				if (temp == MAP_FAILED) {
+	long *offset = NULL;
+
+	if (cfg.num_total_pages != 0) {
+		// Memory usage tests
+		base = mmap(NULL, cfg.num_total_pages * PAGE_SIZE,
+			    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+			    -1, 0);
+		if (base == MAP_FAILED) {
+			perror("mmap failed");
+			exit(EXIT_FAILURE);
+		}
+	} else {
+		// Time usage tests
+		size_t num_tot_requests =
+			cfg.num_requests_per_thread * num_threads;
+
+		int offset_size =
+			up_align(num_tot_requests * sizeof(long), PAGE_SIZE);
+		offset = mmap(NULL, offset_size, PROT_READ | PROT_WRITE,
+			      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (offset == MAP_FAILED) {
+			perror("mmap failed");
+			exit(EXIT_FAILURE);
+		}
+
+		unsigned long reserved_region_size =
+			cfg.num_pages_per_request * PAGE_SIZE;
+
+		for (int i = 0; i < num_tot_requests; i++) {
+			offset[i] = i * reserved_region_size;
+		}
+
+		if (cfg.mmap_before_spawn) {
+			// munmap or pagefault tests
+			if (cfg.multi_vma_assign_requests) {
+				// Each request is in a VMA
+				base = BASE_PTR;
+				for (int i = 0; i < num_tot_requests; i++) {
+					char *temp =
+						mmap(base + offset[i],
+						     reserved_region_size,
+						     PROT_READ | PROT_WRITE,
+						     MAP_PRIVATE | MAP_FIXED |
+							     MAP_ANONYMOUS,
+						     -1, 0);
+					if (temp == MAP_FAILED) {
+						perror("mmap failed");
+						exit(EXIT_FAILURE);
+					}
+				}
+			} else {
+				// All requests are in one VMA
+				base = mmap(NULL,
+					    num_tot_requests *
+						    reserved_region_size,
+					    PROT_READ | PROT_WRITE,
+					    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+				if (base == MAP_FAILED) {
 					perror("mmap failed");
 					exit(EXIT_FAILURE);
 				}
 			}
+
+			if (cfg.trigger_fault_before_spawn) {
+				// Trigger page faults before spawning threads
+				for (int i = 0; i < num_tot_requests; i++) {
+					char *region = base + offset[i];
+					for (int j = 0;
+					     j < cfg.num_pages_per_request; j++)
+						region[j * PAGE_SIZE] = 1;
+				}
+			}
 		} else {
-			// All requests are in one VMA
-			base = mmap(NULL,
-				    num_tot_requests * reserved_region_size,
-				    PROT_READ | PROT_WRITE,
-				    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-			if (base == MAP_FAILED) {
-				perror("mmap failed");
-				exit(EXIT_FAILURE);
+			// mmap tests
+			if (cfg.is_unfixed_mmap_test) {
+				base = NULL;
+			} else {
+				base = BASE_PTR;
 			}
 		}
 
-		if (cfg.trigger_fault_before_spawn) {
-			// Trigger page faults before spawning threads
-			for (int i = 0; i < num_tot_requests; i++) {
-				char *region = base + offset[i];
-				for (int j = 0; j < cfg.num_pages_per_request;
-				     j++)
-					region[j * PAGE_SIZE] = 1;
+		if (cfg.contention_level == 0) {
+			// Low Contention
+			// Do nothing.
+		} else if (cfg.contention_level == 1) {
+			// Medium Contention
+			// Random shuffle
+			unsigned int rand = 0xdeadbeef - num_threads;
+			for (int i = num_tot_requests - 1; i > 0; i--) {
+				rand = simple_get_rand(rand);
+				int j = rand % (i + 1);
+				long temp = offset[i];
+				offset[i] = offset[j];
+				offset[j] = temp;
 			}
-		}
-	} else {
-		// mmap tests
-		if (cfg.is_unfixed_mmap_test) {
-			base = NULL;
+		} else if (cfg.contention_level == 2) {
+			// High Contention
+			for (int i = 0; i < num_threads; i++) {
+				int idx = i;
+				for (int j = i * cfg.num_requests_per_thread;
+				     j < (i + 1) * cfg.num_requests_per_thread;
+				     j++) {
+					offset[j] = idx * reserved_region_size;
+					idx += num_threads;
+				}
+			}
 		} else {
-			base = BASE_PTR;
-		}
-	}
-
-	if (cfg.rand_assign_requests) {
-		// Random shuffle
-		unsigned int rand = 0xdeadbeef - num_threads;
-		for (int i = num_tot_requests - 1; i > 0; i--) {
-			rand = simple_get_rand(rand);
-			int j = rand % (i + 1);
-			long temp = offset[i];
-			offset[i] = offset[j];
-			offset[j] = temp;
+			perror("Invalid Contention Level");
+			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -330,11 +366,12 @@ void run_test(int num_threads, void *(*worker_thread)(void *),
 	// Create threads and trigger page faults in parallel
 	for (int i = 0; i < num_threads; i++) {
 		thread_data[i].base = base;
-		thread_data[i].offset =
-			offset + i * cfg.num_requests_per_thread;
+		if (offset != NULL) {
+			thread_data[i].offset =
+				offset + i * cfg.num_requests_per_thread;
+		}
 		thread_data[i].thread_id = i;
 		thread_data[i].tot_threads = num_threads;
-		thread_data[i].interval = interval;
 		thread_data[i].is_unfixed_mmap_test = cfg.is_unfixed_mmap_test;
 
 		if (pthread_create(&threads[i], NULL, worker_thread,
@@ -369,8 +406,7 @@ void run_test(int num_threads, void *(*worker_thread)(void *),
 		exit(EXIT_FAILURE);
 	}
 	for (int i = 0; i < num_threads; i++) {
-		fprintf(file, "%ld\n%ld\n", thread_data[i].tput,
-			thread_data[i].lat);
+		fprintf(file, "%ld\n", thread_data[i].lat);
 	}
 	fclose(file);
 }
