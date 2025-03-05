@@ -10,6 +10,7 @@ use ostd::{
     cpu::{all_cpus, CpuId, PinCurrentCpu},
     sync::SpinLock,
     task::{
+        disable_preempt,
         scheduler::{
             info::CommonSchedInfo, inject_scheduler, EnqueueFlags, LocalRunQueue, Scheduler,
             UpdateFlags,
@@ -213,9 +214,18 @@ impl Scheduler for ClassScheduler {
             return None;
         }
 
+        // Preempt if the new task has a higher priority.
+        let should_preempt = rq
+            .current
+            .as_ref()
+            .is_none_or(|((_, rq_current_thread), _)| {
+                thread.sched_attr().policy() < rq_current_thread.sched_attr().policy()
+            });
+
         thread.sched_attr().set_last_cpu(cpu);
         rq.enqueue_entity((task, thread), Some(flags));
-        Some(cpu)
+
+        should_preempt.then_some(cpu)
     }
 
     fn local_mut_rq_with(&self, f: &mut dyn FnMut(&mut dyn LocalRunQueue)) {
