@@ -3,7 +3,7 @@
 #![warn(unused)]
 
 use alloc::{boxed::Box, sync::Arc};
-use core::fmt;
+use core::{fmt, sync::atomic::Ordering};
 
 use ostd::{
     arch::read_tsc as sched_clock,
@@ -255,7 +255,7 @@ impl ClassScheduler {
         let guard = disable_local();
         let mut selected = guard.current_cpu();
         let mut minimum_load = u32::MAX;
-        for candidate in affinity.load().iter() {
+        for candidate in affinity.load(Ordering::Relaxed).iter() {
             let rq = self.rqs[candidate.as_usize()].lock();
             let (load, _) = rq.nr_queued_and_running();
             if load < minimum_load {

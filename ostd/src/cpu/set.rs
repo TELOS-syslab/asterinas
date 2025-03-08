@@ -167,20 +167,22 @@ impl AtomicCpuSet {
 
     /// Loads the value of the set.
     ///
-    /// This operation can only be done in the [`Ordering::Relaxed`] memory
-    /// order. It cannot be used to synchronize anything between CPUs.
-    pub fn load(&self) -> CpuSet {
-        let bits = core::array::from_fn(|i| self.bits[i].load(Ordering::Relaxed));
+    /// This operation can be viewed as a collection of [`Self::contains`]
+    /// operations. All of them are done separately and follow the specified
+    /// ordering. This operation is not atomic.
+    pub fn load(&self, ordering: Ordering) -> CpuSet {
+        let bits = core::array::from_fn(|i| self.bits[i].load(ordering));
         CpuSet { bits }
     }
 
     /// Stores a new value to the set.
     ///
-    /// This operation can only be done in the [`Ordering::Relaxed`] memory
-    /// order. It cannot be used to synchronize anything between CPUs.
-    pub fn store(&self, value: &CpuSet) {
+    /// This operation can be viewed as a collection of [`Self::add`] and
+    /// [`Self::remove`] operations. All of them are done separately and
+    /// follow the specified ordering. This operation is not atomic.
+    pub fn store(&self, value: &CpuSet, ordering: Ordering) {
         for (part, new_part) in self.bits.iter().zip(value.bits.iter()) {
-            part.store(*new_part, Ordering::Relaxed);
+            part.store(*new_part, ordering);
         }
     }
 
@@ -190,6 +192,17 @@ impl AtomicCpuSet {
         let bit_idx = bit_idx(cpu_id);
         if part_idx < self.bits.len() {
             self.bits[part_idx].fetch_or(1 << bit_idx, ordering);
+        }
+    }
+
+    /// Atomically adds a set of CPUs.
+    ///
+    /// This operation can be viewed as a collection of [`Self::add`]
+    /// operations. All of them are done separately and follow the specified
+    /// ordering. This operation is not atomic.
+    pub fn add_set(&self, set: &CpuSet, ordering: Ordering) {
+        for (part, new_part) in self.bits.iter().zip(set.bits.iter()) {
+            part.fetch_or(*new_part, ordering);
         }
     }
 
@@ -264,7 +277,7 @@ mod test {
                 }
             }
 
-            let loaded = atomic_set.load();
+            let loaded = atomic_set.load(Ordering::Relaxed);
             for cpu_id in loaded.iter() {
                 if cpu_id.as_usize() % 3 == 0 {
                     assert!(loaded.contains(cpu_id));
@@ -273,7 +286,10 @@ mod test {
                 }
             }
 
-            atomic_set.store(&CpuSet::with_capacity_val(test_num_cpus, 0));
+            atomic_set.store(
+                &CpuSet::with_capacity_val(test_num_cpus, 0),
+                Ordering::Relaxed,
+            );
 
             for cpu_id in test_all_iter() {
                 assert!(!atomic_set.contains(cpu_id, Ordering::Relaxed));
