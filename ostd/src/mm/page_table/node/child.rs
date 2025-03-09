@@ -4,7 +4,7 @@
 
 use core::{mem::ManuallyDrop, panic};
 
-use super::{MapTrackingStatus, PageTableEntryTrait, PageTableNode};
+use super::{MapTrackingStatus, PageTableEntryTrait, RawPageTableNode};
 use crate::{
     arch::mm::{PageTableEntry, PagingConsts},
     mm::{
@@ -22,10 +22,10 @@ pub(in crate::mm) enum Child<
     C: PagingConstsTrait = PagingConsts,
 > {
     /// A owning handle to a raw page table node.
-    PageTable(PageTableNode<E, C>),
-    /// A reference of a child page table node, in the form of a physical
+    PageTable(RawPageTableNode<E, C>),
+    /// A referece of a child page table node, in the form of a physical
     /// address.
-    PageTableRef(ManuallyDrop<PageTableNode<E, C>>),
+    PageTableRef(Paddr),
     /// A mapped frame.
     Frame(Frame<dyn AnyFrameMeta>, PageProperty),
     /// Mapped frames that are not tracked by handles.
@@ -35,6 +35,11 @@ pub(in crate::mm) enum Child<
 }
 
 impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
+    /// Returns whether the child does not map to anything.
+    pub(in crate::mm) fn is_none(&self) -> bool {
+        matches!(self, Child::None)
+    }
+
     /// Returns whether the child is compatible with the given node.
     ///
     /// In other words, it checks whether the child can be a child of a node
@@ -117,9 +122,7 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
         if !pte.is_last(level) {
             // SAFETY: The physical address points to a valid page table node
             // at the given level.
-            let node = unsafe { PageTableNode::from_raw_paddr(paddr) };
-            debug_assert_eq!(node.level(), level - 1);
-            return Child::PageTable(node);
+            return Child::PageTable(unsafe { RawPageTableNode::from_raw_parts(paddr, level - 1) });
         }
 
         match is_tracked {
@@ -176,13 +179,11 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
                 unsafe { inc_frame_ref_count(paddr) };
                 // SAFETY: The physical address points to a valid page table node
                 // at the given level.
-                let node = unsafe { PageTableNode::from_raw_paddr(paddr) };
-                debug_assert_eq!(node.level(), level - 1);
-                return Child::PageTable(node);
+                return Child::PageTable(unsafe {
+                    RawPageTableNode::from_raw_parts(paddr, level - 1)
+                });
             } else {
-                return Child::PageTableRef(ManuallyDrop::new(PageTableNode::from_raw_paddr(
-                    paddr,
-                )));
+                return Child::PageTableRef(paddr);
             }
         }
 
