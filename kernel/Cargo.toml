@@ -72,8 +72,10 @@ tdx-guest = { version = "0.2.1", optional = true }
 riscv = { version = "0.11.1", features = ["s-mode"] }
 
 [features]
-all = ["cvm_guest"]
+default = ["dist_vmar_alloc"]
+all = ["cvm_guest", "dist_vmar_alloc"]
 cvm_guest = ["dep:tdx-guest", "ostd/cvm_guest", "aster-virtio/cvm_guest"]
+dist_vmar_alloc = []
 
 [lints]
 workspace = true
