@@ -64,6 +64,8 @@ CARGO_OSDK_ARGS += --init-args="/test/boot_hello.sh"
 else ifeq ($(AUTO_TEST), vsock)
 export VSOCK=on
 CARGO_OSDK_ARGS += --init-args="/test/run_vsock_test.sh"
+else ifeq ($(AUTO_TEST), scale_old)
+CARGO_OSDK_ARGS += --init-args="/test/micro_bench_vm_scale_old.sh"
 endif
 
 ifeq ($(RELEASE_LTO), 1)

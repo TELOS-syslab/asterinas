@@ -23,7 +23,7 @@ pub(in crate::mm) enum Child<
 > {
     /// A owning handle to a raw page table node.
     PageTable(RawPageTableNode<E, C>),
-    /// A referece of a child page table node, in the form of a physical
+    /// A reference of a child page table node, in the form of a physical
     /// address.
     PageTableRef(Paddr),
     /// A mapped frame.
