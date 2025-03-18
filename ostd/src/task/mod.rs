@@ -15,6 +15,7 @@ use core::{
     cell::{Cell, SyncUnsafeCell},
     ops::Deref,
     ptr::NonNull,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use kernel_stack::KernelStack;
@@ -54,6 +55,10 @@ pub struct Task {
     /// kernel stack, note that the top is SyscallFrame/TrapFrame
     #[expect(dead_code)]
     kstack: KernelStack,
+
+    /// This is to check if we would context switch to a running task.
+    // TODO: use `#[cfg(debug_assertions)]` when the scheduler API is sound.
+    foreground: AtomicBool,
 
     schedule_info: TaskScheduleInfo,
 }
@@ -204,7 +209,10 @@ impl TaskOptions {
         /// all task will entering this function
         /// this function is mean to executing the task_fn in Task
         extern "C" fn kernel_task_entry() -> ! {
-            // See `switch_to_task` for why we need this.
+            // See `switch_to_task` for why we need them.
+            if let Some(current) = Task::current() {
+                current.foreground.store(false, Ordering::Release);
+            }
             crate::arch::irq::enable_local();
 
             let current_task = Task::current()
@@ -257,6 +265,7 @@ impl TaskOptions {
             schedule_info: TaskScheduleInfo {
                 cpu: AtomicCpuId::default(),
             },
+            foreground: AtomicBool::new(false),
         };
 
         Ok(new_task)

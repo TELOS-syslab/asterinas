@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::sync::Arc;
-use core::ptr::NonNull;
+use core::{ptr::NonNull, sync::atomic::Ordering};
 
 use super::{context_switch, Task, TaskContext, POST_SCHEDULE_HANDLER};
 use crate::cpu_local_cell;
@@ -49,6 +49,16 @@ pub(super) fn switch_to_task(next_task: Arc<Task>) {
     let current_task_ctx_ptr = if !current_task_ptr.is_null() {
         // SAFETY: The current task is always alive.
         let current_task = unsafe { &*current_task_ptr };
+
+        while current_task
+            .foreground
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            log::warn!("Switching to a task already running in the foreground");
+            core::hint::spin_loop();
+        }
+
         current_task.save_fpu_state();
 
         // Throughout this method, the task's context is alive and can be exclusively used.
@@ -99,10 +109,14 @@ pub(super) fn switch_to_task(next_task: Arc<Task>) {
     // next task. Not dropping is just fine because the only consequence is that we delay the drop
     // to the next task switching.
 
+    // Set the previous running task to background.
+    // See also `kernel_task_entry`.
+    if let Some(current) = Task::current() {
+        current.foreground.store(false, Ordering::Release);
+    }
     // See also `kernel_task_entry`.
     crate::arch::irq::enable_local();
 
-    // The `next_task` was moved into `CURRENT_TASK_PTR` above, now restore its FPU state.
     if let Some(current) = Task::current() {
         current.restore_fpu_state();
     }
