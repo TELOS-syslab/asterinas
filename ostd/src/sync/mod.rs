@@ -8,24 +8,21 @@ mod rcu;
 mod rwarc;
 mod rwlock;
 mod rwmutex;
-mod spin;
+pub(crate) mod spin;
 mod wait;
 
-pub(crate) use self::{guard::GuardTransfer, rcu::finish_grace_period};
+pub(crate) use self::{
+    guard::GuardTransfer,
+    rcu::{after_grace_period, finish_grace_period},
+};
 pub use self::{
     guard::{LocalIrqDisabled, PreemptDisabled, WriteIrqDisabled},
-    mutex::{ArcMutexGuard, Mutex, MutexGuard},
+    mutex::{Mutex, MutexGuard},
     rcu::{OwnerPtr, Rcu, RcuOption, RcuReadGuard},
     rwarc::{RoArc, RwArc},
-    rwlock::{
-        ArcRwLockReadGuard, ArcRwLockUpgradeableGuard, ArcRwLockWriteGuard, RwLock,
-        RwLockReadGuard, RwLockUpgradeableGuard, RwLockWriteGuard,
-    },
-    rwmutex::{
-        ArcRwMutexReadGuard, ArcRwMutexUpgradeableGuard, ArcRwMutexWriteGuard, RwMutex,
-        RwMutexReadGuard, RwMutexUpgradeableGuard, RwMutexWriteGuard,
-    },
-    spin::{ArcSpinLockGuard, SpinLock, SpinLockGuard},
+    rwlock::{RwLock, RwLockReadGuard, RwLockUpgradeableGuard, RwLockWriteGuard},
+    rwmutex::{RwMutex, RwMutexReadGuard, RwMutexUpgradeableGuard, RwMutexWriteGuard},
+    spin::{SpinLock, SpinLockGuard},
     wait::{WaitQueue, Waiter, Waker},
 };
 

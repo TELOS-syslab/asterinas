@@ -4,30 +4,33 @@
 
 use core::{mem::ManuallyDrop, panic};
 
-use super::{MapTrackingStatus, PageTableEntryTrait, RawPageTableNode};
+use super::{MapTrackingStatus, PageTableEntryTrait, PageTableNode};
 use crate::{
     arch::mm::{PageTableEntry, PagingConsts},
     mm::{
         frame::{inc_frame_ref_count, meta::AnyFrameMeta, Frame},
         page_prop::PageProperty,
+        vm_space::Token,
         Paddr, PagingConstsTrait, PagingLevel,
     },
 };
 
 /// A child of a page table node.
-///
-/// This is a owning handle to a child of a page table node. If the child is
-/// either a page table node or a page, it holds a reference count to the
-/// corresponding page.
 #[derive(Debug)]
 pub(in crate::mm) enum Child<
     E: PageTableEntryTrait = PageTableEntry,
     C: PagingConstsTrait = PagingConsts,
 > {
-    PageTable(RawPageTableNode<E, C>),
+    /// A owning handle to a raw page table node.
+    PageTable(PageTableNode<E, C>),
+    /// A reference of a child page table node, in the form of a physical
+    /// address.
+    PageTableRef(Paddr),
+    /// A mapped frame.
     Frame(Frame<dyn AnyFrameMeta>, PageProperty),
-    /// Pages not tracked by handles.
+    /// Mapped frames that are not tracked by handles.
     Untracked(Paddr, PagingLevel, PageProperty),
+    Token(Token),
     None,
 }
 
@@ -48,13 +51,14 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
     ) -> bool {
         match self {
             Child::PageTable(pt) => node_level == pt.level() + 1,
+            Child::PageTableRef(_) => false,
             Child::Frame(p, _) => {
-                node_level == p.level() && is_tracked == MapTrackingStatus::Tracked
+                node_level == p.map_level() && is_tracked == MapTrackingStatus::Tracked
             }
             Child::Untracked(_, level, _) => {
                 node_level == *level && is_tracked == MapTrackingStatus::Untracked
             }
-            Child::None => true,
+            Child::None | Child::Token(_) => true,
         }
     }
 
@@ -71,14 +75,18 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
         match self {
             Child::PageTable(pt) => {
                 let pt = ManuallyDrop::new(pt);
-                E::new_pt(pt.paddr())
+                E::new_pt(pt.start_paddr())
+            }
+            Child::PageTableRef(_) => {
+                panic!("`PageTableRef` should not be converted to PTE");
             }
             Child::Frame(page, prop) => {
-                let level = page.level();
+                let level = page.map_level();
                 E::new_page(page.into_raw(), level, prop)
             }
             Child::Untracked(pa, level, prop) => E::new_page(pa, level, prop),
             Child::None => E::new_absent(),
+            Child::Token(token) => E::new_token(token),
         }
     }
 
@@ -100,7 +108,13 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
         is_tracked: MapTrackingStatus,
     ) -> Self {
         if !pte.is_present() {
-            return Child::None;
+            let paddr = pte.paddr();
+            if paddr == 0 {
+                return Child::None;
+            } else {
+                // SAFETY: The physical address is written as a valid token.
+                return Child::Token(unsafe { Token::from_raw_inner(paddr) });
+            }
         }
 
         let paddr = pte.paddr();
@@ -108,7 +122,9 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
         if !pte.is_last(level) {
             // SAFETY: The physical address points to a valid page table node
             // at the given level.
-            return Child::PageTable(unsafe { RawPageTableNode::from_raw_parts(paddr, level - 1) });
+            let pt = unsafe { PageTableNode::from_raw(paddr) };
+            debug_assert_eq!(pt.level(), level - 1);
+            return Child::PageTable(pt);
         }
 
         match is_tracked {
@@ -122,7 +138,16 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
         }
     }
 
-    /// Gains an extra owning reference to the child.
+    /// Gains an extra reference to the child.
+    ///
+    /// If the child is a frame, it increases the reference count of the frame.
+    ///
+    /// If the child is a page table node, the returned value depends on
+    /// `clone_raw`:
+    ///  - If `clone_raw` is `true`, it returns a new owning handle to the page
+    ///    table node ([`Child::PageTable`]).
+    ///  - If `clone_raw` is `false`, it returns a reference to the page table
+    ///    node ([`Child::PageTableRef`]).
     ///
     /// # Safety
     ///
@@ -131,24 +156,37 @@ impl<E: PageTableEntryTrait, C: PagingConstsTrait> Child<E, C> {
     ///
     /// This method must not be used with a PTE that has been restored to a
     /// child using the [`Child::from_pte`] method.
-    pub(super) unsafe fn clone_from_pte(
+    pub(super) unsafe fn ref_from_pte(
         pte: &E,
         level: PagingLevel,
         is_tracked: MapTrackingStatus,
+        clone_raw: bool,
     ) -> Self {
         if !pte.is_present() {
-            return Child::None;
+            let paddr = pte.paddr();
+            if paddr == 0 {
+                return Child::None;
+            } else {
+                // SAFETY: The physical address is written as a valid token.
+                return Child::Token(unsafe { Token::from_raw_inner(paddr) });
+            }
         }
 
         let paddr = pte.paddr();
 
         if !pte.is_last(level) {
-            // SAFETY: The physical address is valid and the PTE already owns
-            // the reference to the page.
-            unsafe { inc_frame_ref_count(paddr) };
-            // SAFETY: The physical address points to a valid page table node
-            // at the given level.
-            return Child::PageTable(unsafe { RawPageTableNode::from_raw_parts(paddr, level - 1) });
+            if clone_raw {
+                // SAFETY: The physical address is valid and the PTE already owns
+                // the reference to the page.
+                unsafe { inc_frame_ref_count(paddr) };
+                // SAFETY: The physical address points to a valid page table node
+                // at the given level.
+                let pt = unsafe { PageTableNode::from_raw(paddr) };
+                debug_assert_eq!(pt.level(), level - 1);
+                return Child::PageTable(pt);
+            } else {
+                return Child::PageTableRef(paddr);
+            }
         }
 
         match is_tracked {
