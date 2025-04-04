@@ -1,11 +1,11 @@
 { lib, stdenv, fetchFromGitHub, hostPlatform, writeClosure, busybox, apps
-, linux_vdso, benchmark, syscall, }:
+, linux_vdso, benchmark, syscall, db, libgomp, gperftools }:
 let
   etc = lib.fileset.toSource {
     root = ./../src/etc;
     fileset = ./../src/etc;
   };
-  gvisor_libs = builtins.path {
+  host_shared_libs = builtins.path {
     name = "gvisor-libs";
     path = "/lib/x86_64-linux-gnu";
   };
@@ -37,6 +37,13 @@ in stdenv.mkDerivation {
 
     ${lib.optionalString (apps != null) ''
       cp -r ${apps.package}/* $out/test/
+      # Copy runtime libraries for Metis/Dedup/Psearchy for CortenMM Eval
+      # Berkeley DB
+      cp -L ${db}/lib/libdb-5.3.so $out/lib/x86_64-linux-gnu/libdb-5.3.so
+      # OpenMP
+      cp -L ${libgomp}/lib/libgomp.so.1.0.0 $out/lib/x86_64-linux-gnu/libgomp.so.1
+      # TCMalloc
+      cp -L ${gperftools}/lib/libtcmalloc_minimal.so.4 $out/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4
     ''}
 
     ${lib.optionalString (benchmark != null) ''
@@ -45,16 +52,14 @@ in stdenv.mkDerivation {
 
     ${lib.optionalString (syscall != null) ''
       cp -r "${syscall.package}"/opt/* $out/opt/
-
-      # FIXME: Build gvisor syscall test with nix to avoid manual library copying.
-      if [ "${syscall.testSuite}" == "gvisor" ]; then
-        cp -L ${gvisor_libs}/ld-linux-x86-64.so.2 $out/lib64/ld-linux-x86-64.so.2
-        cp -L ${gvisor_libs}/libstdc++.so.6 $out/lib/x86_64-linux-gnu/libstdc++.so.6
-        cp -L ${gvisor_libs}/libgcc_s.so.1 $out/lib/x86_64-linux-gnu/libgcc_s.so.1
-        cp -L ${gvisor_libs}/libc.so.6 $out/lib/x86_64-linux-gnu/libc.so.6
-        cp -L ${gvisor_libs}/libm.so.6 $out/lib/x86_64-linux-gnu/libm.so.6
-      fi
     ''}
+
+    # FIXME: Build gvisor syscall test & parsec with nix to avoid manual library copying.
+    cp -L ${host_shared_libs}/ld-linux-x86-64.so.2 $out/lib64/ld-linux-x86-64.so.2
+    cp -L ${host_shared_libs}/libstdc++.so.6 $out/lib/x86_64-linux-gnu/libstdc++.so.6
+    cp -L ${host_shared_libs}/libgcc_s.so.1 $out/lib/x86_64-linux-gnu/libgcc_s.so.1
+    cp -L ${host_shared_libs}/libc.so.6 $out/lib/x86_64-linux-gnu/libc.so.6
+    cp -L ${host_shared_libs}/libm.so.6 $out/lib/x86_64-linux-gnu/libm.so.6
 
     # Use `writeClosure` to retrieve all dependencies of the specified packages.
     # This will generate a text file containing the complete closure of the packages,
