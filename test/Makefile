@@ -17,6 +17,7 @@ INITRAMFS_IMAGE := $(BUILD_DIR)/initramfs.cpio.gz
 endif
 EXT2_IMAGE := $(BUILD_DIR)/ext2.img
 EXFAT_IMAGE := $(BUILD_DIR)/exfat.img
+BENCH_DATA_IMAGE := $(BUILD_DIR)/bench_data.img
 INITRAMFS_EMPTY_DIRS := \
 	$(INITRAMFS)/root \
 	$(INITRAMFS)/tmp \
@@ -43,6 +44,9 @@ INITRAMFS_ALL_DIRS += $(INITRAMFS)/test
 endif
 
 SYSCALL_TEST_DIR := $(INITRAMFS)/opt/syscall_test
+
+PARSEC_KERNELS := canneal dedup streamcluster
+PARSEC_APPS := blackscholes bodytrack facesim ferret fluidanimate freqmine vips x264
 
 .PHONY: all
 all: build
@@ -79,6 +83,11 @@ $(INITRAMFS)/lib/x86_64-linux-gnu: | $(VDSO_LIB)
 	@# required for netlink test
 	@cp -L /lib/x86_64-linux-gnu/libnl-3.so.200 $@
 	@cp -L /lib/x86_64-linux-gnu/libnl-route-3.so.200 $@
+	@# required for metis/dedup/parsec
+	@cp -L /lib/x86_64-linux-gnu/libdb-5.3.so $@
+	@cp -L /usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0 $@/libgomp.so.1
+	@# TC malloc
+	@cp -L /lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 $@
 
 $(VDSO_LIB): | $(VDSO_DIR) $(BINARY_CACHE_DIR)/vdso64.so
 	@# TODO: use a custom compiled vdso.so file in the future.
@@ -112,6 +121,9 @@ $(INITRAMFS)/sbin:
 $(INITRAMFS)/usr/bin: | $(INITRAMFS)/bin
 	@mkdir -p $@
 	@cp /usr/bin/busybox $@
+	@cp /usr/bin/env $@
+	@cp /usr/bin/bash $@
+	@cp /usr/bin/head $@
 
 $(INITRAMFS)/usr/local:
 	@mkdir -p $@
@@ -128,20 +140,27 @@ $(INITRAMFS)/benchmark: | $(INITRAMFS)/benchmark/bin
 
 $(INITRAMFS)/benchmark/bin:
 	@mkdir -p $@
-	@cp /usr/local/benchmark/sysbench/bin/sysbench $@
-	@cp /usr/local/benchmark/iperf/bin/iperf3 $@
-	@cp /usr/local/benchmark/membench/membench $@
-	@cp /usr/local/benchmark/iozone $@
-	@cp -r /usr/local/benchmark/unixbench $@
-	@cp -r /usr/local/benchmark/lmbench $@
-	@cp /usr/local/benchmark/fio/bin/fio $@
-	@cp /usr/local/benchmark/sqlite-speedtest1 $@
-	@cp /usr/local/leveldb/benchmark/db_bench $@
-	@mv $@/db_bench $@/db_bench_leveldb
-	@cp /usr/local/leveldb/benchmark/db_bench_sqlite3 $@
-	@cp /usr/local/benchmark/hackbench $@
-	@cp /usr/local/benchmark/schbench $@
-
+	@if [ -d /root/mm-scalability-benchmark/ ]; then \
+		mkdir -p $@/metis; \
+		cp /root/mm-scalability-benchmark/mosbench/metis_with_radixvm/metis/obj/app/wrmem $@/metis; \
+		mkdir -p $@/psearchy; \
+		cp /root/mm-scalability-benchmark/mosbench/psearchy/mkdb/pedsort $@/psearchy; \
+		cp /root/mm-scalability-benchmark/mosbench/psearchy/mkdb/pedsort-tc $@/psearchy; \
+		cp /root/mm-scalability-benchmark/mosbench/psearchy/linux_files_index $@/psearchy; \
+		for i in $(PARSEC_KERNELS); do \
+			mkdir -p $@/$$i; \
+			cp /root/mm-scalability-benchmark/parsec-3.0/pkgs/kernels/$$i/inst/amd64-linux.gcc/bin/$$i $@/$$i; \
+		done; \
+		for i in $(PARSEC_APPS); do \
+			mkdir -p $@/$$i; \
+			cp /root/mm-scalability-benchmark/parsec-3.0/pkgs/apps/$$i/inst/amd64-linux.gcc/bin/$$i $@/$$i; \
+		done; \
+		mkdir -p $@/swaptions; \
+		cp /root/mm-scalability-benchmark/parsec-3.0/pkgs/apps/swaptions/obj/amd64-linux.gcc-tbb/swaptions $@/swaptions; \
+		cp /root/mm-scalability-benchmark/dedup-tc $@/dedup; \
+		mkdir -p $@/vm_scale_bench_data; \
+	fi
+	
 # Make necessary directories.
 $(INITRAMFS_EMPTY_DIRS):
 	@mkdir -p $@
@@ -189,8 +208,30 @@ $(EXFAT_IMAGE):
 	@fallocate -l 64M $(EXFAT_IMAGE)
 	@mkfs.exfat $(EXFAT_IMAGE)
 
+$(BENCH_DATA_IMAGE):
+	@dd if=/dev/zero of=$(BENCH_DATA_IMAGE) bs=2G count=4 iflag=fullblock
+	@mkfs.ext2 $(BENCH_DATA_IMAGE)
+	@if [ -d /root/mm-scalability-benchmark/ ]; then \
+		mkdir -p /mnt/data_mount; \
+		mount -t ext2 $(BENCH_DATA_IMAGE) /mnt/data_mount; \
+		cp -r /root/mm-scalability-benchmark/data/* /mnt/data_mount/; \
+		cp -r /root/linux-2.6.35 /mnt/data_mount/; \
+		for i in $(PARSEC_KERNELS); do \
+			if [ "$$i" != "streamcluster" ]; then \
+				mkdir -p /mnt/data_mount/$$i; \
+				tar -xf /root/mm-scalability-benchmark/parsec-3.0/pkgs/kernels/$$i/inputs/input_native.tar -C /mnt/data_mount/$$i; \
+			fi; \
+		done; \
+		for i in $(PARSEC_APPS); do \
+			mkdir -p /mnt/data_mount/$$i; \
+			tar -xf /root/mm-scalability-benchmark/parsec-3.0/pkgs/apps/$$i/inputs/input_native.tar -C /mnt/data_mount/$$i; \
+		done; \
+		umount /mnt/data_mount; \
+		rm -rf /mnt/data_mount/; \
+	fi
+
 .PHONY: build
-build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE)
+build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE) $(BENCH_DATA_IMAGE)
 
 .PHONY: format
 format:
