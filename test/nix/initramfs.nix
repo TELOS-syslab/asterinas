@@ -1,13 +1,17 @@
 { lib, stdenv, fetchFromGitHub, hostPlatform, writeClosure, busybox, apps
-, linux_vdso, benchmark, syscall, }:
+, linux_vdso, benchmark, syscall }:
 let
   etc = lib.fileset.toSource {
     root = ./../src/etc;
     fileset = ./../src/etc;
   };
-  gvisor_libs = builtins.path {
-    name = "gvisor-libs";
+  host_shared_libs = builtins.path {
+    name = "host-shared-libs";
     path = "/lib/x86_64-linux-gnu";
+  };
+  host_usr_bin = builtins.path {
+    name = "host-usr-bin";
+    path = "/usr/bin";
   };
   all_pkgs = [ busybox etc linux_vdso ]
     ++ lib.optionals (apps != null) [ apps.package ]
@@ -45,16 +49,20 @@ in stdenv.mkDerivation {
 
     ${lib.optionalString (syscall != null) ''
       cp -r "${syscall.package}"/opt/* $out/opt/
-
-      # FIXME: Build gvisor syscall test with nix to avoid manual library copying.
-      if [ "${syscall.testSuite}" == "gvisor" ]; then
-        cp -L ${gvisor_libs}/ld-linux-x86-64.so.2 $out/lib64/ld-linux-x86-64.so.2
-        cp -L ${gvisor_libs}/libstdc++.so.6 $out/lib/x86_64-linux-gnu/libstdc++.so.6
-        cp -L ${gvisor_libs}/libgcc_s.so.1 $out/lib/x86_64-linux-gnu/libgcc_s.so.1
-        cp -L ${gvisor_libs}/libc.so.6 $out/lib/x86_64-linux-gnu/libc.so.6
-        cp -L ${gvisor_libs}/libm.so.6 $out/lib/x86_64-linux-gnu/libm.so.6
-      fi
     ''}
+
+    # FIXME: Build gvisor syscall test & parsec with nix to avoid manual library copying.
+    cp -L ${host_shared_libs}/ld-linux-x86-64.so.2 $out/lib64/ld-linux-x86-64.so.2
+    cp -L ${host_shared_libs}/libstdc++.so.6 $out/lib/x86_64-linux-gnu/libstdc++.so.6
+    cp -L ${host_shared_libs}/libgcc_s.so.1 $out/lib/x86_64-linux-gnu/libgcc_s.so.1
+    cp -L ${host_shared_libs}/libc.so.6 $out/lib/x86_64-linux-gnu/libc.so.6
+    cp -L ${host_shared_libs}/libm.so.6 $out/lib/x86_64-linux-gnu/libm.so.6
+    cp -L ${host_shared_libs}/libdb-5.3.so $out/lib/x86_64-linux-gnu/libdb-5.3.so
+    cp -L ${host_shared_libs}/libgomp.so.1.0.0 $out/lib/x86_64-linux-gnu/libgomp.so.1
+    cp -L ${host_shared_libs}/libtcmalloc_minimal.so.4 $out/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4
+    cp -L ${host_shared_libs}/libtinfo.so.6.3 $out/lib/x86_64-linux-gnu/libtinfo.so.6
+
+    cp ${host_usr_bin}/bash $out/usr/bin/bash
 
     # Use `writeClosure` to retrieve all dependencies of the specified packages.
     # This will generate a text file containing the complete closure of the packages,
