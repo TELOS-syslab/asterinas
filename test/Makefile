@@ -17,6 +17,7 @@ INITRAMFS_IMAGE := $(BUILD_DIR)/initramfs.cpio.gz
 endif
 EXT2_IMAGE := $(BUILD_DIR)/ext2.img
 EXFAT_IMAGE := $(BUILD_DIR)/exfat.img
+METIS_IMAGE := $(BUILD_DIR)/metis.img
 INITRAMFS_EMPTY_DIRS := \
 	$(INITRAMFS)/root \
 	$(INITRAMFS)/tmp \
@@ -70,6 +71,8 @@ $(INITRAMFS)/lib/x86_64-linux-gnu: | $(VDSO_LIB)
 	@cp -L /lib/x86_64-linux-gnu/libevent-2.1.so.7 $@
 	@# required for VDSO
 	@cp -L $(VDSO_LIB) $@
+	@# required for metis/dedup/parsec
+	@cp -L /lib/x86_64-linux-gnu/libdb-5.3.so $@
 
 $(VDSO_LIB): | $(VDSO_DIR) $(BINARY_CACHE_DIR)/vdso64.so
 	@# TODO: use a custom compiled vdso.so file in the future.
@@ -132,7 +135,16 @@ $(INITRAMFS)/benchmark/bin:
 	@cp /usr/local/leveldb/benchmark/db_bench_sqlite3 $@
 	@cp /usr/local/benchmark/hackbench $@
 	@cp /usr/local/benchmark/schbench $@
-
+	@if [ -d /root/mm-scalability-benchmark/ ]; then \
+		mkdir -p $@/metis/data; \
+		cp -r /root/mm-scalability-benchmark/mosbench/metis_with_radixvm/metis/obj/app $@/metis; \
+		mkdir -p $@/psearchy; \
+		cp /root/mm-scalability-benchmark/mosbench/psearchy/mkdb/pedsort $@/psearchy; \
+		mkdir -p $@/dedup/data; \
+		cp /root/mm-scalability-benchmark/parsec-3.0/pkgs/kernels/dedup/inst/amd64-linux.gcc/bin/dedup $@/dedup; \
+		cp /root/mm-scalability-benchmark/parsec-3.0/pkgs/kernels/dedup/inputs/* $@/dedup/data; \
+	fi
+	
 # Make necessary directories.
 $(INITRAMFS_EMPTY_DIRS):
 	@mkdir -p $@
@@ -180,8 +192,19 @@ $(EXFAT_IMAGE):
 	@fallocate -l 64M $(EXFAT_IMAGE)
 	@mkfs.exfat $(EXFAT_IMAGE)
 
+$(METIS_IMAGE):
+	@dd if=/dev/zero of=$(METIS_IMAGE) bs=2G count=15 iflag=fullblock
+	@mkfs.ext2 $(METIS_IMAGE)
+	@if [ -d /root/mm-scalability-benchmark/ ]; then \
+		mkdir -p /mnt/metis_mount; \
+		mount -t ext2 $(METIS_IMAGE) /mnt/metis_mount; \
+		cp -r /root/mm-scalability-benchmark/mosbench/metis/data/* /mnt/metis_mount/; \
+		umount /mnt/metis_mount; \
+		rm -rf /mnt/metis_mount/; \
+	fi
+
 .PHONY: build
-build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE)
+build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE) $(METIS_IMAGE)
 
 .PHONY: format
 format:
