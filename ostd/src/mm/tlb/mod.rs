@@ -99,12 +99,23 @@ impl<'a, G: PinCurrentCpu> TlbFlusher<'a, G> {
     /// [`Self::issue_tlb_flush_with`] starts to be processed after this
     /// function. But it may not be synchronous. Upon the return of this
     /// function, the TLB entries may not be coherent.
-    pub fn dispatch_tlb_flush(&mut self) {
+    pub fn dispatch_tlb_flush(&mut self, ipi: bool) {
         let irq_guard = crate::trap::disable_local();
         let local_flush_ops = LOCAL_FLUSH_OPS.get_with(&irq_guard);
         let mut local_flush_ops = local_flush_ops.borrow_mut();
 
         if local_flush_ops.is_empty() {
+            return;
+        }
+
+        if !ipi {
+            if self
+                .target_cpus
+                .map(|s| s.contains(irq_guard.current_cpu(), Ordering::Acquire))
+                .unwrap_or(true)
+            {
+                local_flush_ops.flush_without_clear();
+            }
             return;
         }
 
@@ -312,6 +323,11 @@ impl OpsStack {
     }
 
     fn flush_all(&mut self) {
+        self.flush_without_clear();
+        self.clear_without_flush();
+    }
+
+    fn flush_without_clear(&self) {
         if self.need_flush_all {
             crate::arch::mm::tlb_flush_all_excluding_global();
         } else {
@@ -321,8 +337,6 @@ impl OpsStack {
                 }
             }
         }
-
-        self.clear_without_flush();
     }
 
     fn clear_without_flush(&mut self) {

@@ -196,8 +196,8 @@ impl Vmar_ {
                 break;
             }
         }
-        cursor.flusher().dispatch_tlb_flush();
-        cursor.flusher().sync_tlb_flush();
+        cursor.flusher().dispatch_tlb_flush(false);
+        // cursor.flusher().sync_tlb_flush();
 
         Ok(())
     }
@@ -439,7 +439,7 @@ impl Vmar_ {
         let new_vmo_backed_id_alloc = self.vmo_backed_id_alloc.load(Ordering::Acquire);
 
         cur_cursor.flusher().issue_tlb_flush(TlbFlushOp::All);
-        cur_cursor.flusher().dispatch_tlb_flush();
+        cur_cursor.flusher().dispatch_tlb_flush(true);
         cur_cursor.flusher().sync_tlb_flush();
         drop(new_cursor);
         drop(cur_cursor);

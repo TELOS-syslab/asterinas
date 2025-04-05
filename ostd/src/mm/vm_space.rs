@@ -276,7 +276,7 @@ impl<'b> CursorMut<'_, 'b> {
         if let Some(old) = old {
             self.flusher
                 .issue_tlb_flush_with(TlbFlushOp::Address(start_va), old);
-            self.flusher.dispatch_tlb_flush();
+            self.flusher.dispatch_tlb_flush(true);
         }
     }
 
@@ -342,7 +342,7 @@ impl<'b> CursorMut<'_, 'b> {
         }
 
         #[cfg(not(feature = "lazy_tlb_flush_on_unmap"))]
-        self.flusher.dispatch_tlb_flush();
+        self.flusher.dispatch_tlb_flush(true);
     }
 
     /// Applies the operation to the next slot of mapping within the range.
