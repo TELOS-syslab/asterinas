@@ -15,7 +15,7 @@ use crate::{
     },
     prelude::*,
     process::{
-        check_executable_file, posix_thread::ThreadName, renew_vm_and_map, Credentials, Process,
+        check_executable_file, posix_thread::ThreadName, renew_vm, Credentials, Process,
         ProgramToLoad, MAX_ARGV_NUMBER, MAX_ARG_LEN, MAX_ENVP_NUMBER, MAX_ENV_LEN,
     },
 };
@@ -122,7 +122,7 @@ fn do_execve(
     let program_to_load =
         ProgramToLoad::build_from_file(elf_file.clone(), fs_resolver, argv, envp, 1)?;
 
-    renew_vm_and_map(ctx);
+    renew_vm(ctx);
 
     if process.status().is_vfork_child() {
         // Resumes the parent process.
