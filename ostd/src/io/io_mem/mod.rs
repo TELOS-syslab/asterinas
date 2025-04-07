@@ -112,6 +112,7 @@ impl IoMem {
         let priv_flags = PrivilegedPageFlags::empty();
 
         let prop = PageProperty {
+            has_map: true,
             flags,
             cache,
             priv_flags,
