@@ -8,7 +8,7 @@ use core::ops::Range;
 use align_ext::AlignExt;
 use aster_rights::Full;
 use ostd::{
-    mm::{CachePolicy, PageFlags, PageProperty, VmIo},
+    mm::{vm_space::VmItem, CachePolicy, PageFlags, PageProperty, VmIo},
     task::disable_preempt,
 };
 use xmas_elf::program::{self, ProgramHeader64};
@@ -404,10 +404,10 @@ fn map_segment_vmo(
                 new_frame.write_bytes(0, &buffer).unwrap();
                 new_frame
             };
-            cursor.map(
+            cursor.map(VmItem::Frame(
                 new_frame.into(),
                 PageProperty::new_user(page_flags, CachePolicy::Writeback),
-            );
+            ));
         }
 
         // Tail padding.
@@ -429,10 +429,10 @@ fn map_segment_vmo(
 
             let tail_page_addr = map_addr + tail_padding_offset.align_down(PAGE_SIZE);
             cursor.jump(tail_page_addr)?;
-            cursor.map(
+            cursor.map(VmItem::Frame(
                 new_frame.into(),
                 PageProperty::new_user(page_flags, CachePolicy::Writeback),
-            );
+            ));
         }
     }
 

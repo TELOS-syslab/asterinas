@@ -366,6 +366,7 @@ fn handle_kernel_page_fault(f: &TrapFrame, page_fault_vaddr: u64) {
         PrivFlags::GLOBAL
     });
     let prop = PageProperty {
+        has_map: true,
         flags: PageFlags::RW,
         cache: CachePolicy::Uncacheable,
         priv_flags,
