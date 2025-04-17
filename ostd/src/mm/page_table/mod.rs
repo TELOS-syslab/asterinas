@@ -9,11 +9,12 @@ use core::{
 };
 
 use super::{
-    nr_subpage_per_huge, page_prop::PageProperty, page_size, Paddr, PagingConstsTrait, PagingLevel,
-    PodOnce, Vaddr,
+    nr_subpage_per_huge, page_prop::PageProperty, page_size, vm_space::Status, Paddr,
+    PagingConstsTrait, PagingLevel, PodOnce, Vaddr,
 };
 use crate::{
     arch::mm::{PageTableEntry, PagingConsts},
+    task::disable_preempt,
     util::SameSizeAs,
     Pod,
 };
@@ -21,7 +22,9 @@ use crate::{
 mod node;
 use node::*;
 pub mod cursor;
-pub use cursor::{Cursor, CursorMut, PageTableItem};
+mod zeroed_pt_pool;
+pub(crate) use cursor::PageTableItem;
+pub use cursor::{Cursor, CursorMut};
 #[cfg(ktest)]
 mod test;
 
@@ -85,7 +88,7 @@ pub struct PageTable<
     E: PageTableEntryTrait = PageTableEntry,
     C: PagingConstsTrait = PagingConsts,
 > {
-    root: RawPageTableNode<E, C>,
+    root: PageTableNode<E, C>,
     _phantom: PhantomData<M>,
 }
 
@@ -97,26 +100,6 @@ impl PageTable<UserMode> {
             self.root.activate();
         }
     }
-
-    /// Clear the page table.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that:
-    ///  1. No other cursors are accessing the page table.
-    ///  2. No other CPUs activates the page table.
-    pub(in crate::mm) unsafe fn clear(&self) {
-        let mut root_node = self.root.clone_shallow().lock();
-        const NR_PTES_PER_NODE: usize = nr_subpage_per_huge::<PagingConsts>();
-        for i in 0..NR_PTES_PER_NODE / 2 {
-            let root_entry = root_node.entry(i);
-            if !root_entry.is_none() {
-                let old = root_entry.replace(Child::None);
-                // Since no others are accessing the old child, dropping it is fine.
-                drop(old);
-            }
-        }
-    }
 }
 
 impl PageTable<KernelMode> {
@@ -125,9 +108,14 @@ impl PageTable<KernelMode> {
     /// This should be the only way to create the user page table, that is to
     /// duplicate the kernel page table with all the kernel mappings shared.
     pub fn create_user_page_table(&self) -> PageTable<UserMode> {
-        let mut root_node = self.root.clone_shallow().lock();
-        let mut new_node =
-            PageTableNode::alloc(PagingConsts::NR_LEVELS, MapTrackingStatus::NotApplicable);
+        let preempt_guard = disable_preempt();
+        zeroed_pt_pool::prefill(&preempt_guard);
+        let mut root_node = self.root.clone().lock();
+        let mut new_node = zeroed_pt_pool::alloc(
+            &preempt_guard,
+            PagingConsts::NR_LEVELS,
+            MapTrackingStatus::NotApplicable,
+        );
 
         // Make a shallow copy of the root node in the kernel space range.
         // The user space range is not copied.
@@ -139,8 +127,10 @@ impl PageTable<KernelMode> {
             }
         }
 
+        let _ = root_node.unlock();
+
         PageTable::<UserMode> {
-            root: new_node.into_raw(),
+            root: new_node.unlock(),
             _phantom: PhantomData,
         }
     }
@@ -160,7 +150,8 @@ impl PageTable<KernelMode> {
         let end = root_index.end;
         debug_assert!(end <= NR_PTES_PER_NODE);
 
-        let mut root_node = self.root.clone_shallow().lock();
+        let guard = disable_preempt();
+        let mut root_node = self.root.clone().lock();
         for i in start..end {
             let root_entry = root_node.entry(i);
             if root_entry.is_none() {
@@ -172,10 +163,11 @@ impl PageTable<KernelMode> {
                 } else {
                     MapTrackingStatus::Untracked
                 };
-                let node = PageTableNode::alloc(nxt_level, is_tracked);
-                let _ = root_entry.replace(Child::PageTable(node.into_raw()));
+                let node = zeroed_pt_pool::alloc(&guard, nxt_level, is_tracked);
+                let _ = root_entry.replace(Child::PageTable(node.unlock()));
             }
         }
+        let _ = root_node.unlock();
     }
 
     /// Protect the given virtual address range in the kernel page table.
@@ -191,8 +183,11 @@ impl PageTable<KernelMode> {
         vaddr: &Range<Vaddr>,
         mut op: impl FnMut(&mut PageProperty),
     ) -> Result<(), PageTableError> {
+        fn status_op(_: &mut Status) {}
         let mut cursor = CursorMut::new(self, vaddr)?;
-        while let Some(range) = cursor.protect_next(vaddr.end - cursor.virt_addr(), &mut op) {
+        while let Some(range) =
+            cursor.protect_next(vaddr.end - cursor.virt_addr(), &mut op, &mut status_op)
+        {
             crate::arch::mm::tlb_flush_addr(range.start);
         }
         Ok(())
@@ -202,9 +197,14 @@ impl PageTable<KernelMode> {
 impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> PageTable<M, E, C> {
     /// Create a new empty page table. Useful for the kernel page table and IOMMU page tables only.
     pub fn empty() -> Self {
+        let preempt_guard = disable_preempt();
         PageTable {
-            root: PageTableNode::<E, C>::alloc(C::NR_LEVELS, MapTrackingStatus::NotApplicable)
-                .into_raw(),
+            root: zeroed_pt_pool::alloc(
+                &preempt_guard,
+                C::NR_LEVELS,
+                MapTrackingStatus::NotApplicable,
+            )
+            .unlock(),
             _phantom: PhantomData,
         }
     }
@@ -218,7 +218,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> PageTab
     /// It is dangerous to directly provide the physical address of the root page table to the
     /// hardware since the page table node may be dropped, resulting in UAF.
     pub unsafe fn root_paddr(&self) -> Paddr {
-        self.root.paddr()
+        self.root.start_paddr()
     }
 
     pub unsafe fn map(
@@ -267,7 +267,7 @@ impl<'a, M: PageTableMode, E: PageTableEntryTrait, C: PagingConstsTrait> PageTab
     /// This is only useful for IOMMU page tables. Think twice before using it in other cases.
     pub unsafe fn shallow_copy(&self) -> Self {
         PageTable {
-            root: self.root.clone_shallow(),
+            root: self.root.clone(),
             _phantom: PhantomData,
         }
     }
@@ -352,9 +352,10 @@ pub trait PageTableEntryTrait:
 
     /// If the flags are present with valid mappings.
     ///
-    /// For PTEs created by [`Self::new_absent`], this method should return
-    /// false. And for PTEs created by [`Self::new_page`] or [`Self::new_pt`]
-    /// and modified with [`Self::set_prop`] this method should return true.
+    /// For PTEs created by [`Self::new_absent`], [`Self::new_status`], this
+    /// method should return false. And for PTEs created by [`Self::new_page`]
+    /// or [`Self::new_pt`], whatever modified with [`Self::set_prop`] or not,
+    /// this method should return true.
     fn is_present(&self) -> bool;
 
     /// Create a new PTE with the given physical address and flags that map to a page.
@@ -363,10 +364,14 @@ pub trait PageTableEntryTrait:
     /// Create a new PTE that map to a child page table.
     fn new_pt(paddr: Paddr) -> Self;
 
+    /// Create a new PTE with the given status value but don't map to anything.
+    fn new_status(status: Status) -> Self;
+
     /// Get the physical address from the PTE.
     /// The physical address recorded in the PTE is either:
-    /// - the physical address of the next level page table;
-    /// - or the physical address of the page it maps to.
+    ///  - the physical address of the next level page table;
+    ///  - the physical address of the page it maps to;
+    ///  - the value of the status.
     fn paddr(&self) -> Paddr;
 
     fn prop(&self) -> PageProperty;
@@ -376,6 +381,11 @@ pub trait PageTableEntryTrait:
     /// This will be only done if the PTE is present. If not, this method will
     /// do nothing.
     fn set_prop(&mut self, prop: PageProperty);
+
+    /// Set the physical address of the PTE.
+    ///
+    /// This can be done for both present and absent PTEs.
+    fn set_paddr(&mut self, paddr: Paddr);
 
     /// If the PTE maps a page rather than a child page table.
     ///

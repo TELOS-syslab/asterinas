@@ -45,7 +45,7 @@ else
 fi
 
 COMMON_QEMU_ARGS="\
-    -cpu Icelake-Server,+x2apic \
+    -cpu host,migratable=off,-pcid,+x2apic \
     -smp ${SMP:-1} \
     -m ${MEM:-8G} \
     --no-reboot \
@@ -59,6 +59,8 @@ COMMON_QEMU_ARGS="\
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -drive if=none,format=raw,id=x0,file=./test/build/ext2.img \
     -drive if=none,format=raw,id=x1,file=./test/build/exfat.img \
+    -drive if=none,format=raw,id=x2,file=./test/build/bench_data.img \
+    -qmp tcp:127.0.0.1:${QMP_PORT-9889},server,nowait
 "
 
 if [ "$1" = "iommu" ]; then
@@ -79,6 +81,7 @@ QEMU_ARGS="\
     -machine q35,kernel-irqchip=split \
     -device virtio-blk-pci,bus=pcie.0,addr=0x6,drive=x0,serial=vext2,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
     -device virtio-blk-pci,bus=pcie.0,addr=0x7,drive=x1,serial=vexfat,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
+    -device virtio-blk-pci,bus=pcie.0,addr=0x8,drive=x2,serial=vbench_data,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
     -device virtio-keyboard-pci,disable-legacy=on,disable-modern=off$IOMMU_DEV_EXTRA \
     -device virtio-net-pci,netdev=net01,disable-legacy=on,disable-modern=off$VIRTIO_NET_FEATURES$IOMMU_DEV_EXTRA \
     -device virtio-serial-pci,disable-legacy=on,disable-modern=off$IOMMU_DEV_EXTRA \

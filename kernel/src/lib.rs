@@ -111,8 +111,15 @@ fn ap_init() {
         log::info!("Kernel idle thread for CPU #{} started.", cpu_id.as_usize());
 
         loop {
-            crate::thread::Thread::yield_now();
+            crate::sched::steal_a_task();
+
+            #[cfg(feature = "breakdown_counters")]
+            crate::fs::procfs::breakdown_counters::idle_start();
+
             ostd::cpu::sleep_for_interrupt();
+
+            #[cfg(feature = "breakdown_counters")]
+            crate::fs::procfs::breakdown_counters::idle_end();
         }
     }
     let preempt_guard = ostd::task::disable_preempt();
@@ -153,8 +160,15 @@ fn init_thread() {
     .expect("Run init process failed.");
     // Wait till initproc become zombie.
     while !initproc.status().is_zombie() {
-        crate::thread::Thread::yield_now();
+        crate::sched::steal_a_task();
+
+        #[cfg(feature = "breakdown_counters")]
+        crate::fs::procfs::breakdown_counters::idle_start();
+
         ostd::cpu::sleep_for_interrupt();
+
+        #[cfg(feature = "breakdown_counters")]
+        crate::fs::procfs::breakdown_counters::idle_end();
     }
 
     // TODO: exit via qemu isa debug device should not be the only way.
