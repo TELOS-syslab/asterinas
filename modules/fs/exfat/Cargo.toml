@@ -21,6 +21,10 @@ lru = "0.12.3"
 hashbrown = "0.14"
 bitflags = "1.3.2"
 ctor = { git="https://github.com/asterinas/rust-ctor" }
+rand = { version = "0.8.5", default-features = false, features = [
+    "small_rng",
+    "std_rng",
+] }
 
 [lints]
 workspace = true

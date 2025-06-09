@@ -5,10 +5,10 @@ use crate::{
     fs::{
         ext2::Ext2,
         fs_resolver::{FsPath, AT_FDCWD},
+        get_fs_registrar,
         overlayfs::OverlayFS,
         path::Dentry,
         utils::{FileSystem, InodeType},
-        get_fs_registrar,
     },
     prelude::*,
     syscall::constants::MAX_FILENAME_LEN,
@@ -177,16 +177,17 @@ fn get_fs(
             let overlay_fs = create_overlayfs(data.as_ref(), ctx)?;
             Ok(overlay_fs)
         }
-        _ => {
-            aster_block::get_device(devname.to_str().unwrap())
-                .ok_or(Error::with_message(Errno::ENOENT, "device does not exist"))
-                .and_then(|device| {
-                    let fs = get_fs_registrar(fs_type)
-                        .ok_or(Error::with_message(Errno::ENOENT, "filesystem registrar not found"))?
-                        .open(device)?;
-                    Ok(fs)
-                })
-        }
+        _ => aster_block::get_device(devname.to_str().unwrap())
+            .ok_or(Error::with_message(Errno::ENOENT, "device does not exist"))
+            .and_then(|device| {
+                let fs = get_fs_registrar(fs_type)
+                    .ok_or(Error::with_message(
+                        Errno::ENOENT,
+                        "filesystem registrar not found",
+                    ))?
+                    .open(device)?;
+                Ok(fs)
+            }),
     }
 }
 

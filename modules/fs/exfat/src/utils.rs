@@ -67,7 +67,7 @@ impl DosTimestamp {
         // When ktesting, the time module has not been initialized yet, return a fake value instead.
         #[cfg(ktest)]
         {
-            use aster_time::SystemTime;
+            use aster_nix::time::SystemTime;
             DosTimestamp::from_duration(
                 SystemTime::UNIX_EPOCH.duration_since(&SystemTime::UNIX_EPOCH)?,
             )

@@ -31,16 +31,20 @@ mod test {
         bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio},
         BlockDevice, BlockDeviceMeta,
     };
+    use aster_nix::fs::utils::{
+        generate_random_operation, new_fs_in_memory, Inode, InodeMode, InodeType,
+    };
+    use log::info;
     use ostd::{
-        mm::{ostd::mm::PAGE_SIZE, FrameAllocOptions, Segment, VmIo},
+        mm::{FrameAllocOptions, Segment, VmIo},
         prelude::*,
     };
     use rand::{rngs::SmallRng, RngCore, SeedableRng};
 
     use crate::{
+        alloc::string::ToString,
         constants::{EXFAT_RESERVED_CLUSTERS, MAX_NAME_LENGTH},
         prelude::*,
-        utils::{generate_random_operation, new_fs_in_memory, Inode, InodeMode, InodeType},
         ExfatFS, ExfatMountOptions,
     };
 
@@ -138,11 +142,7 @@ mod test {
     }
 
     fn create_file(parent: Arc<dyn Inode>, filename: &str) -> Arc<dyn Inode> {
-        let create_result = parent.create(
-            filename,
-            crate::fs::utils::InodeType::File,
-            InodeMode::all(),
-        );
+        let create_result = parent.create(filename, InodeType::File, InodeMode::all());
 
         assert!(
             create_result.is_ok(),
@@ -156,7 +156,7 @@ mod test {
     fn create_folder(parent: Arc<dyn Inode>, foldername: &str) -> Arc<dyn Inode> {
         let create_result = parent.create(
             foldername,
-            crate::fs::utils::InodeType::Dir,
+            aster_nix::fs::utils::InodeType::Dir,
             InodeMode::all(),
         );
 
@@ -186,14 +186,11 @@ mod test {
         create_folder(root.clone(), dir_name);
 
         // test create with an exist name
-        let create_file_with_an_exist_name = root.create(
-            dir_name,
-            crate::fs::utils::InodeType::File,
-            InodeMode::all(),
-        );
+        let create_file_with_an_exist_name =
+            root.create(dir_name, InodeType::File, InodeMode::all());
         let create_dir_with_an_exist_name = root.create(
             file_name,
-            crate::fs::utils::InodeType::Dir,
+            aster_nix::fs::utils::InodeType::Dir,
             InodeMode::all(),
         );
         assert!(
@@ -203,11 +200,7 @@ mod test {
 
         // test create with a long name
         let long_file_name = "x".repeat(MAX_NAME_LENGTH);
-        let create_long_name_file = root.create(
-            &long_file_name,
-            crate::fs::utils::InodeType::File,
-            InodeMode::all(),
-        );
+        let create_long_name_file = root.create(&long_file_name, InodeType::File, InodeMode::all());
         assert!(
             create_long_name_file.is_ok(),
             "Fail to create a long name file"
@@ -216,7 +209,7 @@ mod test {
         let long_dir_name = "y".repeat(MAX_NAME_LENGTH);
         let create_long_name_dir = root.create(
             &long_dir_name,
-            crate::fs::utils::InodeType::Dir,
+            aster_nix::fs::utils::InodeType::Dir,
             InodeMode::all(),
         );
         assert!(

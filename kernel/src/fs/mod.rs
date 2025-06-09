@@ -23,7 +23,6 @@ use alloc::collections::BTreeMap;
 
 use aster_block::BlockDevice;
 use aster_virtio::device::block::device::BlockDevice as VirtIoBlockDevice;
-use ostd::early_print;
 use spin::Once;
 
 use crate::{
