@@ -161,6 +161,19 @@ $(INITRAMFS)/benchmark: | $(INITRAMFS)/benchmark/bin
 
 $(INITRAMFS)/benchmark/bin:
 	@mkdir -p $@
+	@cp /usr/local/benchmark/sysbench/bin/sysbench $@
+	@cp /usr/local/benchmark/iperf/bin/iperf3 $@
+	@cp /usr/local/benchmark/membench/membench $@
+	@cp /usr/local/benchmark/iozone $@
+	@cp -r /usr/local/benchmark/unixbench $@
+	@cp -r /usr/local/benchmark/lmbench $@
+	@cp /usr/local/benchmark/fio/bin/fio $@
+	@cp /usr/local/benchmark/sqlite-speedtest1 $@
+	@cp /usr/local/leveldb/benchmark/db_bench $@
+	@mv $@/db_bench $@/db_bench_leveldb
+	@cp /usr/local/leveldb/benchmark/db_bench_sqlite3 $@
+	@cp /usr/local/benchmark/hackbench $@
+	@cp /usr/local/benchmark/schbench $@
 	@if [ -d /root/mm-scalability-benchmark/ ]; then \
 		mkdir -p $@/metis; \
 		cp /root/mm-scalability-benchmark/mosbench/metis_with_radixvm/metis/obj/app/wrmem $@/metis; \
